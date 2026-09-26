@@ -30,8 +30,8 @@ from .dialogs import (
     BatchRenameDialog, MetadataDialog, OrganizeDialog, RenameDialog, RewriteDialog, SettingsDialog, show_report,
 )
 from .file_model import (
-    COL, COLUMNS, DAY_ROLE, NO_PROJECT, PERIOD_ROLE, PROJECT_ROLE, REC_ROLE, RecordingsModel, RecordingsProxy,
-    build_project_tree, in_period, period_label,
+    COL, COLUMNS, DAY_ROLE, NO_PROJECT, PERIOD_ROLE, PROJECT_ROLE, REC_ROLE, RECORDER_ROLE, RecordingsModel,
+    RecordingsProxy, build_project_tree, in_period, period_label, recorder_label,
 )
 from .offload_page import OffloadPage
 from .player import SEEK_STEP, PlayerWidget
@@ -94,7 +94,9 @@ class MainWindow(QMainWindow):
         self.grouping = QComboBox()
         self.grouping.addItem("By year and month", "date")
         self.grouping.addItem("By project name", "name")
-        self.grouping.setToolTip("How the sidebar lists projects: by year, then month, or A to Z by name")
+        self.grouping.addItem("By recorder", "recorder")
+        self.grouping.setToolTip("How the sidebar lists projects: by year, then month; A to Z by name; or by "
+                                 "the recorder that made them")
         self.grouping.setCurrentIndex(max(self.grouping.findData(settings.get(self.qsettings, "library_grouping")), 0))
         self.grouping.currentIndexChanged.connect(self._grouping_changed)
         tree_panel = QWidget()
@@ -535,15 +537,15 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _scope_of(index: QModelIndex) -> tuple:
-        """(project, day, period) of a sidebar node; all None for "All recordings"."""
+        """(project, day, period, recorder) of a sidebar node; all None for "All recordings"."""
         if not index.isValid():
-            return (None, None, None)
-        return (index.data(PROJECT_ROLE), index.data(DAY_ROLE), index.data(PERIOD_ROLE))
+            return (None, None, None, None)
+        return (index.data(PROJECT_ROLE), index.data(DAY_ROLE), index.data(PERIOD_ROLE), index.data(RECORDER_ROLE))
 
     @staticmethod
     def _is_scope(scope: tuple) -> bool:
-        """A project, day, year or month (anything narrower than all recordings)."""
-        return scope[0] is not None or scope[2] is not None
+        """A project, day, year, month or recorder (anything narrower than all recordings)."""
+        return scope[0] is not None or scope[2] is not None or scope[3] is not None
 
     def _tree_indexes(self, parent: QModelIndex = QModelIndex()):
         for row in range(self.tree_model.rowCount(parent)):
@@ -574,7 +576,8 @@ class MainWindow(QMainWindow):
         self.tree.selectionModel().blockSignals(True)
         by_date = self.grouping.currentData() == "date"
         build_project_tree(self.tree_model, self.model.recs, by_date=by_date,
-                           counts=settings.get(self.qsettings, "library_counts"))
+                           counts=settings.get(self.qsettings, "library_counts"),
+                           by_recorder=self.grouping.currentData() == "recorder")
         target = self.tree_model.index(0, 0)
         for index in self._tree_indexes():
             key = self._scope_of(index)
@@ -589,7 +592,7 @@ class MainWindow(QMainWindow):
         self.tree.setCurrentIndex(target)
         self.tree.selectionModel().blockSignals(False)
         scope = self._scope_of(target)
-        if scope != (self.proxy.project, self.proxy.day, self.proxy.period):
+        if scope != (self.proxy.project, self.proxy.day, self.proxy.period, self.proxy.recorder):
             self.proxy.set_scope(*scope)
         self._update_status()
 
@@ -777,11 +780,12 @@ class MainWindow(QMainWindow):
         scope = self._scope_of(index)
         if not self._is_scope(scope):
             return
-        project, day, period = scope
+        project, day, period, recorder = scope
         recs = self._recs_in_scope(*scope)
         menu = QMenu(self)
-        if project is None:  # a year, a month or "no date"
-            label = period_label(period) + (f" {period[:4]}" if len(period or "") == 7 else "")
+        if project is None:  # a year, a month, "no date" or a recorder
+            label = recorder if recorder is not None else \
+                period_label(period) + (f" {period[:4]}" if len(period or "") == 7 else "")
             projects = len({r.project or NO_PROJECT for r in recs})
             report_action = menu.addAction(f"Sound Reports for the {projects:,} Project"
                                            f"{'s' if projects != 1 else ''} in {label}…")
@@ -818,10 +822,11 @@ class MainWindow(QMainWindow):
             action.toggled.connect(lambda on, c=col: header.setSectionHidden(c, not on))
         menu.exec(header.mapToGlobal(pos))
 
-    def _recs_in_scope(self, project, day, period=None) -> list[Recording]:
+    def _recs_in_scope(self, project, day, period=None, recorder=None) -> list[Recording]:
         return [r for r in self.model.recs
                 if (project is None or (r.project or NO_PROJECT) == project)
-                and (day is None or (catalog.day_of(r) or "(No date)") == day) and in_period(r, period)]
+                and (day is None or (catalog.day_of(r) or "(No date)") == day) and in_period(r, period)
+                and (recorder is None or recorder_label(r) == recorder)]
 
     def _family_of(self, recs: list[Recording]) -> list[Recording]:
         chosen = {r.path for r in recs}

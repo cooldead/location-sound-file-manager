@@ -279,3 +279,28 @@ class ProjectCountTest(unittest.TestCase):
         self.assertEqual(model.index(0, 0, month).data(), "A")
         build_project_tree(model, recs, by_date=True, counts="both")
         self.assertEqual(model.index(1, 0).data(), "2026  (2 / 4)")
+
+
+class RecorderTreeTest(unittest.TestCase):
+    def test_by_recorder(self):
+        from PySide6.QtGui import QStandardItemModel
+
+        from sound_file_manager.file_model import (
+            NO_RECORDER, PROJECT_ROLE, RECORDER_ROLE, build_project_tree, recorder_label,
+        )
+
+        from . import qt_app
+        qt_app()
+        recs = [Recording(f"/l/{n}.wav", 1, 0, project=p, recorder=r, date="2026-09-01") for n, (p, r) in enumerate(
+            [("A", "SoundDev: 833 XX0000000000"), ("B", "SoundDev: 833 XX0000000000"), ("A", "ZOOM F8"), ("C", "")])]
+        self.assertEqual(recorder_label(recs[0]), "Sound Devices 833")  # no serial number
+        self.assertEqual(recorder_label(recs[3]), NO_RECORDER)
+        model = QStandardItemModel()
+        build_project_tree(model, recs, counts="both", by_recorder=True)
+        tops = [model.index(r, 0).data() for r in range(model.rowCount())]
+        self.assertEqual(tops, ["All recordings  (3 / 4)", "Sound Devices 833  (2 / 2)", "ZOOM F8  (1 / 1)",
+                                f"{NO_RECORDER}  (1 / 1)"])
+        sd = model.index(1, 0)
+        children = [(model.index(r, 0, sd).data(PROJECT_ROLE), model.index(r, 0, sd).data(RECORDER_ROLE))
+                    for r in range(model.rowCount(sd))]
+        self.assertEqual(children, [("A", "Sound Devices 833"), ("B", "Sound Devices 833")])
