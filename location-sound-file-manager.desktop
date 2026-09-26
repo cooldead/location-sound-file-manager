@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Location Sound File Manager
+GenericName=Sound File Manager
+Comment=Offload recorder cards, make sound reports, and browse, play, rename and organise production sound (BWF/iXML)
+Exec=@APPDIR@/run.sh
+Icon=@APPDIR@/sound_file_manager/assets/icon.png
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=wav;bwf;ixml;timecode;sound;recorder;sound report;offload;sd card;zoom;sound devices;
