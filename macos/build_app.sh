@@ -8,7 +8,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
 name="Location Sound File Manager"
 version="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
-version="${version:-1.2.0}"
+version="${version:-1.3.0}"
 build="$here/build/macos"
 
 # A private venv, so the system/Homebrew Python stays untouched.
