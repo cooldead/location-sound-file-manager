@@ -6,7 +6,9 @@ A desktop app for Linux and macOS for browsing a library of production sound rec
 
 | Platform | Release | Download |
 |---|---|---|
-| **Linux** | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). |
+| **Linux**: Arch, CachyOS, Manjaro | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `location-sound-file-manager-1.4.0-1-any.pkg.tar.zst`: install with `sudo pacman -U location-sound-file-manager-1.4.0-1-any.pkg.tar.zst` (pulls in PySide6, Qt Multimedia and numpy). Adds the app to the menu; remove it with `sudo pacman -R location-sound-file-manager`. |
+| **Linux**: any distribution | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-x86_64.AppImage`: everything inside (Python, Qt, numpy), nothing to install. Make it executable (`chmod +x`, or Properties ▸ Permissions) and open it. Needs a distribution from 2022 or later (glibc 2.35+). |
+| **Linux**: from source | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). Or clone the repository. |
 | **macOS** (Apple silicon) | [v1.4.0 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-macos) | `Location-Sound-File-Manager-1.4.0-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
 
 The Linux and Mac releases are built separately from the shared source. Both platform downloads above include the v1.4.0 features. You can also build the Mac app from source ([macOS](#macos)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
@@ -104,7 +106,9 @@ Developed on CachyOS / KDE Plasma, Wayland. Needs Python 3.11+, PySide6 (Qt 6) w
 sudo pacman -S pyside6 qt6-multimedia qt6-multimedia-ffmpeg python-numpy
 ```
 
-Then get the app, either the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux):
+The easiest way on Arch-based systems is the **Arch package** from the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) (`sudo pacman -U …pkg.tar.zst`); on other distributions, the **AppImage**. If you used `./install.sh` before, delete `~/.local/share/applications/location-sound-file-manager.desktop` so the menu opens the installed version.
+
+To run it from the source instead, get the app, either the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux):
 
 ```sh
 tar xzf Location-Sound-File-Manager-1.4.0-linux.tar.gz
@@ -124,6 +128,8 @@ python3 -m unittest        # tests
 ```
 
 Card detection uses `lsblk`, and ejecting uses `udisksctl` (both are standard on desktop Linux).
+
+**Building the packages:** `linux/build_packages.sh [X.Y.Z]` makes the tarball, the Arch package (with `makepkg`) and an AppImage (PyInstaller in a private venv under `build/`) in `dist/linux/`. An AppImage only runs on distributions whose glibc is at least as new as the build machine's, so the release AppImage is built on Ubuntu 22.04 by GitHub Actions (`.github/workflows/linux-packages.yml`) when a `vX.Y.Z-linux` release is published.
 
 ### macOS
 
