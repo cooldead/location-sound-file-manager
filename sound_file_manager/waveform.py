@@ -40,10 +40,15 @@ def decode(raw: bytes, bits: int, channels: int, is_float: bool) -> np.ndarray:
     elif bits == 16:
         samples = np.frombuffer(raw, "<i2").astype(np.float32) / 32768.0
     elif bits == 24:
-        b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
-        ints = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
-        ints = np.where(ints & 0x800000, ints - 0x1000000, ints)
-        samples = ints.astype(np.float32) / 8388608.0
+        b = np.frombuffer(raw, np.uint8).reshape(-1, 3)
+        # Left-align signed PCM in int32: the sign bit lands in bit 31.
+        # This avoids expanding all three bytes together and allocating a
+        # sign mask/where result for every sample (notably costly on ARM64).
+        ints = b[:, 2].astype(np.int32)
+        ints <<= 24
+        ints |= b[:, 1].astype(np.int32) << 16
+        ints |= b[:, 0].astype(np.int32) << 8
+        samples = ints.astype(np.float32) * (1.0 / 2147483648.0)
     elif bits == 32:
         samples = np.frombuffer(raw, "<i4").astype(np.float32) / 2147483648.0
     elif bits == 8:

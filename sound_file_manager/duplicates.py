@@ -45,7 +45,7 @@ def audio_key(rec: Recording) -> tuple | None:
     if rec.error or not rec.frames:
         return None
     anchor = rec.time_reference if rec.time_reference is not None else ("name", rec.name.casefold())
-    return (rec.sample_rate, rec.channels, rec.bits, rec.frames, anchor)
+    return (rec.sample_rate, rec.channels, rec.bits, rec.float_samples, rec.frames, anchor)
 
 
 def sample_hash(path: str) -> str:
@@ -125,7 +125,8 @@ def more_tracks_candidate(a: Recording, b: Recording) -> bool:
     the smaller file may be a reduced copy of the larger one (e.g. a Zoom file
     without its mix tracks). Checked with channels_contained before acting."""
     return (a.name.casefold() == b.name.casefold() and a.channels != b.channels and a.frames == b.frames
-            and a.sample_rate == b.sample_rate and a.bits == b.bits and a.time_reference is not None
+            and a.sample_rate == b.sample_rate and a.bits == b.bits and a.float_samples == b.float_samples
+            and a.time_reference is not None
             and a.time_reference == b.time_reference and not a.error and not b.error)
 
 
