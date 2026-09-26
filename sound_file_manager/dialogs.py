@@ -3,18 +3,21 @@ applies the result (so every change goes through one place, with undo)."""
 
 from __future__ import annotations
 
+import gzip
+import json
 import os
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QRadioButton, QTreeWidget,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import organize, settings
+from . import library_index, organize, settings, waveform
 from .catalog import Recording
 from .renamer import validate_name
 
@@ -404,11 +407,34 @@ class OrganizeDialog(QDialog):
 
 # ---------------------------------------------------------------- settings
 
+def human_bytes(n: float) -> str:
+    for unit in ("bytes", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
+        n /= 1000
+    return ""
+
+
+def index_estimates(recs: list[Recording], root: str) -> tuple[int, int]:
+    """(metadata index bytes, waveform bytes) for these recordings: the
+    metadata measured on a sample, the waveforms from the track counts."""
+    if not recs:
+        return 0, 0
+    sample = recs[:: max(len(recs) // 400, 1)]
+    index = library_index.LibraryIndex(root)
+    index.replace_all(sample)
+    packed = len(gzip.compress(json.dumps({k: list(v) for k, v in index.entries.items()}).encode(), 6))
+    metadata = packed * len(recs) // max(len(sample), 1)
+    waves = sum(library_index.waveform_bytes(max(r.channels, 1), waveform.BUCKETS) for r in recs if not r.error)
+    return metadata, waves
+
+
 class SettingsDialog(QDialog):
-    def __init__(self, qsettings: QSettings, parent=None):
+    def __init__(self, qsettings: QSettings, parent=None, recordings: list[Recording] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.qsettings = qsettings
+        self.recordings = recordings or []
         self.clear_cache_requested = False
         self.folder = QLineEdit(settings.get(qsettings, "library_folder"))
         browse = QPushButton("Browse…")
@@ -421,6 +447,15 @@ class SettingsDialog(QDialog):
         self.family.setChecked(settings.get(qsettings, "apply_to_take_family"))
         self.confirm_undo = QCheckBox("Ask before undoing")
         self.confirm_undo.setChecked(settings.get(qsettings, "confirm_undo"))
+        self.index = QCheckBox("Keep an index in the library folder")
+        self.index.setChecked(settings.get(qsettings, "library_index"))
+        self.index.setToolTip(f"Writes {library_index.INDEX_FOLDER}/ in the library folder after each scan")
+        self.index_waves = QCheckBox("Also keep waveforms in the index")
+        self.index_waves.setChecked(settings.get(qsettings, "library_index_waveforms"))
+        self.index_waves.toggled.connect(self._waves_toggled)
+        self.index.toggled.connect(self.index_waves.setEnabled)
+        self.index_waves.setEnabled(self.index.isChecked())
+        self._estimates = None
         clear = QPushButton("Clear scan cache…")
         clear.setToolTip("Forget all cached metadata and waveforms; the next scan reads every file again")
         clear.clicked.connect(self._clear)
@@ -441,6 +476,25 @@ class SettingsDialog(QDialog):
         form.addRow("", self.family)
         form.addRow("", self.confirm_undo)
         form.addRow("", clear)
+        form.addRow("Library index:", self.index)
+        meta, waves = self._estimate()
+        count = len(self.recordings)
+        index_hint = QLabel(
+            f"Stores what the scan read from every file (about {human_bytes(meta)} for {count:,} recordings) in "
+            f"a hidden {library_index.INDEX_FOLDER} folder in the library, so another computer's first scan "
+            "doesn't open every file again. An index that is already there is always used; an entry is only "
+            "trusted while the file's size and date are unchanged.")
+        index_hint.setWordWrap(True)
+        index_hint.setEnabled(False)
+        form.addRow("", index_hint)
+        form.addRow("", self.index_waves)
+        waves_hint = QLabel(
+            f"⚠ Takes about {human_bytes(waves)} on the share for {count:,} recordings (8 KB per track per "
+            "file), filled in as files are first shown. Saves reading each WAV again to draw it on another "
+            "computer.")
+        waves_hint.setWordWrap(True)
+        waves_hint.setEnabled(False)
+        form.addRow("", waves_hint)
         box, _ = _buttons(self, "Save")
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -451,6 +505,29 @@ class SettingsDialog(QDialog):
         folder = QFileDialog.getExistingDirectory(self, "Library folder", self.folder.text())
         if folder:
             self.folder.setText(folder)
+
+    def _estimate(self) -> tuple[int, int]:
+        if self._estimates is None:
+            self._estimates = index_estimates(self.recordings, self.folder.text().strip())
+        return self._estimates
+
+    def _waves_toggled(self, on: bool):
+        if not on or settings.get(self.qsettings, "library_index_waveforms"):
+            return
+        waves = self._estimate()[1]
+        free = ""
+        try:
+            free = f"\n\nFree space on the share now: {human_bytes(shutil.disk_usage(self.folder.text().strip()).free)}."
+        except OSError:
+            pass
+        answer = QMessageBox.warning(
+            self, "Waveforms in the library index",
+            f"Keeping waveforms in the library will use about {human_bytes(waves)} on the share for the "
+            f"{len(self.recordings):,} recordings in it now, and more as the library grows. They are written "
+            "as each file's waveform is first drawn." + free + "\n\nKeep waveforms in the library?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+        if answer != QMessageBox.StandardButton.Yes:
+            self.index_waves.setChecked(False)
 
     def _clear(self):
         self.clear_cache_requested = True
@@ -464,6 +541,8 @@ class SettingsDialog(QDialog):
         settings.put(self.qsettings, "write_embedded_filename", self.embedded.isChecked())
         settings.put(self.qsettings, "apply_to_take_family", self.family.isChecked())
         settings.put(self.qsettings, "confirm_undo", self.confirm_undo.isChecked())
+        settings.put(self.qsettings, "library_index", self.index.isChecked())
+        settings.put(self.qsettings, "library_index_waveforms", self.index.isChecked() and self.index_waves.isChecked())
         super().accept()
 
 

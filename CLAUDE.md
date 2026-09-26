@@ -1,6 +1,6 @@
 # Location Sound File Manager: notes for working on this project
 
-A PySide6 (Qt 6) desktop app for Linux (CachyOS, KDE Plasma, Wayland). It manages a library of production sound WAV/BWF files: scanning, grouping by project, playback with a waveform, renaming, metadata editing and reorganising into folders. The user's library is on a CIFS/SMB NAS share with about 21,000 WAVs (2 TB).
+A PySide6 (Qt 6) desktop app for Linux (CachyOS, KDE Plasma, Wayland), also built for macOS (`macos/build_app.sh`). It manages a library of production sound WAV/BWF files: scanning, grouping by project, playback with a waveform, renaming, metadata editing and reorganising into folders. The user's library is on a CIFS/SMB NAS share with about 21,000 WAVs (2 TB).
 
 For the history of how and why things were built, see `docs/DEVELOPMENT_LOG.md`. For features, see `README.md`.
 
@@ -12,6 +12,7 @@ python3 -m unittest        # unit tests (tests/), no GUI or network needed
 ```
 - **System packages:** `pyside6 qt6-multimedia qt6-multimedia-ffmpeg python-numpy`.
 - **GUI testing:** use throwaway scripts that drive `MainWindow` directly, with `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` pointing at a scratch dir so the real settings, cache and history stay untouched. Symlink `~/.config/kdeglobals` into the scratch config dir, or Breeze paints the toolbar with light header colours (a test artifact, not a bug). To stay silent while playing, set `window.player.mixer_panel.state.master_mute = True` (the engine still runs and the channel meters still move). `QT_QPA_PLATFORM=offscreen` works (the player needs no GL; audio still goes to the default device).
+- **macOS:** `macos/build_app.sh [--install]` makes a venv (`.venv`) and a PyInstaller `.app` in `dist/`. Qt on macOS ignores the `XDG_*` variables (and `$HOME` for its standard paths), so GUI test scripts call `QStandardPaths.setTestModeEnabled(True)` before anything else (paths go to `~/.qttest/`). `settings.open_settings()` follows that on macOS.
 - **Never test writes on the real library.** Copy files into a scratch folder first.
 
 ## Layout
@@ -21,6 +22,7 @@ python3 -m unittest        # unit tests (tests/), no GUI or network needed
 | `bwf.py` | **Pure** RIFF/RF64 chunk walker, bext + iXML parsing (`WavInfo`), `update_metadata()` (in place, or a verified full rewrite only with `allow_rewrite`) |
 | `timecode.py` | **Pure** rate parsing ("24000/1001", "023.976-ND", "29.97DF"), samples → SMPTE (drop frame per 12M) |
 | `catalog.py` | **Pure** `Recording` (one row), project assignment (metadata → folder fallback), SQLite `Cache` (metadata + waveform peaks), `scan()` |
+| `library_index.py` | **Pure** index kept in the library (`<library>/.sfm-index/`): `metadata.json.gz` keyed by NFC path below the library + size/mtime, read whole at scan start and saved after a complete scan (temp + `os.replace`); optional `waveforms/<sha1[:2]>/<sha1>.lvl` per recording |
 | `organize.py` | **Pure** `{token}` patterns, move/rename planning with clash errors, `remove_left_empty()` |
 | `renamer.py` | **Pure**, copied from video-renamer: validate, plan, two-phase apply with rollback, undo ops |
 | `waveform.py` | **Pure** (numpy) per-channel peak + RMS levels in dB, with bounded, progressive I/O; `decode()` (PCM → float); `rasterize()` draws them (colour per track, AA, overlay or lanes) |
@@ -85,6 +87,9 @@ python3 -m unittest        # unit tests (tests/), no GUI or network needed
 - **Fewer fingerprints:** copies with the same audio_key and the same file name are taken as the same recording without reading them; a fingerprint is only read for one file per distinct name in a group (e.g. _ISO vs _LR, renamed copies). This is safe because every removal is re-checked byte for byte. It cut a first scan from 11,725 to 3,880 files on the real library. Merge plans use the same shortcut.
 - **Project finding is string work:** `_relative_parts`, and `_FolderIndex` (the files below each folder) instead of pathlib and per-group scans over all recordings. It went from 98 s (29 s without the profiler) to 0.37 s with identical results. After a merge the window re-runs it automatically.
 - **Fingerprints on the NAS:** unbuffered `pread` with `POSIX_FADV_RANDOM` and 64 KB samples. Buffered reads pulled the 4 MB CIFS read-ahead per sample (99 → ~50 ms per file). Parallel reads measured no faster.
+
+- **Library index:** measured over Wi-Fi to the NAS (12 ms ping): a first scan costs ~130 ms per file (open/close alone ~60 ms), the walk ~32 ms per folder + ~8 ms per WAV. The index removes the per-file reads, not the walk. Reading an existing index is always on (it changes nothing); writing it is the `library_index` setting (off by default, the user approves changes to the library), done by `ScanThread` only after a complete scan and only when something changed. Waveforms in the index are a separate setting (`library_index_waveforms`) with a storage warning (estimate + free space) when ticked; they are written by `_PeaksJob` as files are first drawn (and prefetched), only for files below the library. No SQLite on the share: two computers writing one database over SMB can corrupt it, while whole-file replaces can't. Entries match with an mtime tolerance of 10 ms (the same SMB timestamp read by two clients).
+- **Platform differences** stay small and in place (`sys.platform == "darwin"`): card detection (`/sbin/mount` for local `/dev/` mounts, so a network share is never touched by the 3 s poll, then `diskutil info -plist`, cached per device; `RemovableMedia` or an SD bus counts as a card), eject (`diskutil eject` of the whole disk), `MEDIA_FOLDER`, settings in `~/Library/Application Support`, `REPORT_FONT`. macOS has no `copy_file_range` (rewrites copy through a buffer) and no `posix_fadvise` (fingerprints turn read-ahead off with `F_RDAHEAD`). Shortcut text shown in the UI goes through `main_window.keys()` (⌘ on a Mac).
 
 ## Conventions
 

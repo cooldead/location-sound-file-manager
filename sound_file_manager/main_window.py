@@ -46,6 +46,11 @@ from .workers import ScanThread, run_job
 APP_NAME = "Location Sound File Manager"
 
 
+def keys(shortcut: str) -> str:
+    """A shortcut as the platform writes it: Ctrl+F here, ⌘F on a Mac."""
+    return QKeySequence(shortcut).toString(QKeySequence.SequenceFormat.NativeText)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, library: str | None = None):
         super().__init__()
@@ -145,7 +150,7 @@ class MainWindow(QMainWindow):
         self.details.setMinimumWidth(240)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search name, scene, take, note, track, timecode…  (Ctrl+F)")
+        self.search.setPlaceholderText(f"Search name, scene, take, note, track, timecode…  ({keys('Ctrl+F')})")
         self.search.setClearButtonEnabled(True)
         self._search_timer = QTimer(self, singleShot=True, interval=200)
         self._search_timer.timeout.connect(lambda: self._apply_filter(text=True))
@@ -280,8 +285,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _=False, p=page: self.set_page(p))
             self.page_group.addAction(action)
             main.addAction(action)
-        self.act_page_offload.setToolTip("Card → review & notes → sound report → copy to NAS (Ctrl+1)")
-        self.act_page_library.setToolTip("Everything on the NAS: browse, play, rename, re-tag (Ctrl+2)")
+        self.act_page_offload.setToolTip(f"Card → review & notes → sound report → copy to NAS ({keys('Ctrl+1')})")
+        self.act_page_library.setToolTip(f"Everything on the NAS: browse, play, rename, re-tag ({keys('Ctrl+2')})")
         main.addSeparator()
         self.addToolBar(main)
 
@@ -403,9 +408,14 @@ class MainWindow(QMainWindow):
         self.model.set_recordings(recs, self.root)
         self._rebuild_tree()
         self.setWindowTitle(self.root)
+        self._index_waveforms_setting()
         self.offload._fill_destinations()
         self.offload._destination_changed()
         self.start_scan()
+
+    def _index_waveforms_setting(self):
+        write = settings.get(self.qsettings, "library_index") and settings.get(self.qsettings, "library_index_waveforms")
+        self.player.set_library_index(self.root if self.root and os.path.isdir(self.root) else "", write)
 
     def _assign(self, recs):
         catalog.assign_projects(recs, self.root, settings.get(self.qsettings, "container_folders"))
@@ -421,7 +431,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"The library folder is not available:\n{self.root}")
             return
         self._scan_seen = set()
-        self.scan_thread = ScanThread(self.root, self.cache_file, self)
+        self.scan_thread = ScanThread(self.root, self.cache_file, self,
+                                      write_index=settings.get(self.qsettings, "library_index"))
         self.scan_thread.batch.connect(self._scan_batch)
         self.scan_thread.progress.connect(self._scan_progress)
         self.scan_thread.finished_scan.connect(self._scan_finished)
@@ -453,9 +464,13 @@ class MainWindow(QMainWindow):
 
     def _scan_progress(self, stats, path):
         text = f"Scanning… {stats.found:,} files"
+        details = [f"{stats.indexed:,} from the library index"] if stats.indexed else []
         if stats.parsed:
-            text += f" ({stats.parsed:,} read"
-            text += f", {stats.errors:,} unreadable)" if stats.errors else ")"
+            details.append(f"{stats.parsed:,} read")
+        if stats.errors:
+            details.append(f"{stats.errors:,} unreadable")
+        if details:
+            text += f" ({', '.join(details)})"
         self.scan_label.setText(text)
         self.scan_label.setToolTip(path)
 
@@ -478,6 +493,8 @@ class MainWindow(QMainWindow):
                 self._reset_keep_selection(keep)
             text = f"Scanned {stats.found:,} files in {stats.seconds:.0f} s"
             details = []
+            if stats.indexed:
+                details.append(f"{stats.indexed:,} from the library index")
             if stats.parsed:
                 details.append(f"{stats.parsed:,} new or changed")
             if gone:
@@ -485,6 +502,9 @@ class MainWindow(QMainWindow):
             if stats.errors:
                 details.append(f"{stats.errors:,} unreadable")
             self.scan_label.setText(text + (f" ({', '.join(details)})" if details else ""))
+            self.scan_label.setToolTip("The library index was updated" if stats.index_saved else "")
+            if stats.index_error:
+                self.statusBar().showMessage(f"Could not update the library index: {stats.index_error}", 10000)
         self._rebuild_tree()
         self._update_status()
         if getattr(self, "_show_after_scan", None):
@@ -585,7 +605,7 @@ class MainWindow(QMainWindow):
         if selected > 1:
             text += f" · {selected:,} selected"
         if not self.root:
-            text = "Choose a library folder to start (Ctrl+O)"
+            text = f"Choose a library folder to start ({keys('Ctrl+O')})"
         self.status_label.setText(text)
 
     # ------------------------------------------------------------ selection
@@ -996,9 +1016,11 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         old_root = self.root
         old_containers = settings.get(self.qsettings, "container_folders")
-        dialog = SettingsDialog(self.qsettings, self)
+        old_index = settings.get(self.qsettings, "library_index")
+        dialog = SettingsDialog(self.qsettings, self, recordings=self.model.recs)
         if not dialog.exec():
             return
+        self._index_waveforms_setting()
         if dialog.clear_cache_requested:
             self._cancel_scan()
             if self.scan_thread is not None:
@@ -1014,6 +1036,12 @@ class MainWindow(QMainWindow):
             self._assign(self.model.recs)
             self.model.set_recordings(self.model.recs, self.root)
             self._rebuild_tree()
+        if settings.get(self.qsettings, "library_index") and not old_index:
+            # The index is written at the end of a scan.
+            if self.scan_thread is None:
+                self.start_scan()
+            else:
+                self._rescan_after = True
 
     # ------------------------------------------------------------ history
 

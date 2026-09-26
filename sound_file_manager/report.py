@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
@@ -249,6 +250,8 @@ def table(recs: list[Recording], columns: list[str] | None = None) -> tuple[list
 # Usable page width (Letter minus 12 mm margins) and, without Qt, the
 # characters that fit across it at 8 pt; plus how wide the long-text columns
 # may grow before they wrap.
+# The PDF font; column widths are measured with the same one. Noto Sans is not on a Mac.
+REPORT_FONT = "Helvetica Neue" if sys.platform == "darwin" else "Noto Sans"
 PAGE_WIDTH_MM = {"landscape": 279.4 - 24, "portrait": 215.9 - 24}
 LINE_CHARS = {"landscape": 175, "portrait": 130}
 WRAP_CAPS = {"notes": 70, "tracks": 40}
@@ -263,7 +266,7 @@ def _qt_measure(orientation: str = "landscape"):
         return None
     if QGuiApplication.instance() is None:
         return None
-    regular = QFont("Noto Sans")
+    regular = QFont(REPORT_FONT)
     regular.setPointSizeF(8)
     bold = QFont(regular)
     bold.setBold(True)
@@ -473,7 +476,7 @@ def build_html(info: ReportInfo, recs: list[Recording]) -> str:
                  f"height='{brand.logo_height}'></td>") if brand.logo_path() else ""
     company = (f"<br><span style='color:#555555'>{escape(brand.company)}</span>" if brand.company.strip() else "")
     return f"""
-<html><body style="font-family:'Noto Sans','DejaVu Sans',sans-serif; font-size:8pt; color:#111111">
+<html><body style="font-family:'{REPORT_FONT}','DejaVu Sans',sans-serif; font-size:8pt; color:#111111">
 <table width="100%" cellspacing="0" cellpadding="0"><tr>
 {logo_cell}
 <td valign="middle"{' style="padding-left:12px"' if logo_cell else ''}>

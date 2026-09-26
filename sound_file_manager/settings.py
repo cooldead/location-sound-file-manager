@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths
@@ -27,6 +28,10 @@ DEFAULTS: dict[str, object] = {
     "mixer_folder": "",               # where mixer settings / automation are saved
     "mixer_collapsed": False,
     "library_counts": "projects",     # sidebar numbers: "projects", "files" or "both"
+    # Keep an index in the library (<library>/.sfm-index) so other computers
+    # don't read every file again; optionally with the waveforms (large).
+    "library_index": False,
+    "library_index_waveforms": False,
     "library_grouping": "date",       # Library sidebar: "date" (year > month > project) or "name"
     # Offload
     "verify_copies": True,           # read each copy back and compare with the card
@@ -102,7 +107,11 @@ def migrate_old_folders() -> list[str]:
 
 
 def open_settings() -> QSettings:
-    """~/.config/location-sound-file-manager/settings.ini"""
+    """~/.config/location-sound-file-manager/settings.ini (macOS: in
+    ~/Library/Application Support/location-sound-file-manager/, next to the
+    history, where Mac apps keep their files; Qt would use ~/.config there too)."""
+    if sys.platform == "darwin":
+        return QSettings(str(history_path().parent / "settings.ini"), QSettings.Format.IniFormat)
     return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, APP_DIR, "settings")
 
 

@@ -17,6 +17,7 @@ byte with the copy that is kept (see files_identical / audio_identical).
 from __future__ import annotations
 
 import difflib
+import fcntl
 import hashlib
 import os
 import re
@@ -60,6 +61,8 @@ def sample_hash(path: str) -> str:
     try:
         if hasattr(os, "posix_fadvise"):
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
+        elif hasattr(fcntl, "F_RDAHEAD"):  # macOS has no fadvise; this turns read-ahead off
+            fcntl.fcntl(fd, fcntl.F_RDAHEAD, 0)
         with os.fdopen(fd, "rb", buffering=0, closefd=False) as f:
             layout = bwf.read_layout(f, os.fstat(fd).st_size)
         fmt, data = layout.first(b"fmt "), layout.first(b"data")

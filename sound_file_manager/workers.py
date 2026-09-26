@@ -8,7 +8,7 @@ from typing import Callable
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import QProgressDialog, QWidget
 
-from . import catalog
+from . import catalog, library_index
 
 
 class ScanThread(QThread):
@@ -16,9 +16,10 @@ class ScanThread(QThread):
     progress = Signal(object, str)  # ScanStats, current path
     finished_scan = Signal(object, str)  # ScanStats or None, error
 
-    def __init__(self, root: str, cache_file: str, parent=None):
+    def __init__(self, root: str, cache_file: str, parent=None, *, write_index: bool = False):
         super().__init__(parent)
         self.root, self.cache_file = root, cache_file
+        self.write_index = write_index
         self._cancel = False
 
     def cancel(self):
@@ -28,9 +29,18 @@ class ScanThread(QThread):
         cache = None
         try:
             cache = catalog.Cache(self.cache_file)
+            # An index in the library is always read (that changes nothing);
+            # it is only written when the setting allows it.
+            index = library_index.LibraryIndex.load(self.root)
             stats = catalog.scan(self.root, cache, on_batch=self.batch.emit,
                                  on_progress=lambda s, p: self.progress.emit(s, p),
-                                 cancelled=lambda: self._cancel)
+                                 cancelled=lambda: self._cancel, index=index)
+            if self.write_index and not self._cancel and index.changed:
+                try:
+                    index.save()
+                    stats.index_saved = True
+                except OSError as error:
+                    stats.index_error = str(error)
             self.finished_scan.emit(stats, "")
         except Exception as error:  # noqa: BLE001
             self.finished_scan.emit(None, f"{error}\n\n{traceback.format_exc()}")

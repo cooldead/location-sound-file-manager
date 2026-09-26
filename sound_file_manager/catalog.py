@@ -116,7 +116,7 @@ class Recording:
         return tc.rate_label(self.rate, self.drop_frame)
 
 
-_CACHED_FIELDS = [f.name for f in fields(Recording) if f.name not in ("project", "project_from")]
+CACHED_FIELDS = [f.name for f in fields(Recording) if f.name not in ("project", "project_from")]
 
 
 def recording_from_info(path: str, size: int, mtime: float, info: bwf.WavInfo) -> Recording:
@@ -259,12 +259,12 @@ class Cache:
             return None
         try:
             values = json.loads(row[2])
-            return Recording(**{k: values[k] for k in _CACHED_FIELDS if k in values})
+            return Recording(**{k: values[k] for k in CACHED_FIELDS if k in values})
         except (ValueError, TypeError):
             return None
 
     def put(self, rec: Recording, commit: bool = True) -> None:
-        data = {k: v for k, v in asdict(rec).items() if k in _CACHED_FIELDS}
+        data = {k: v for k, v in asdict(rec).items() if k in CACHED_FIELDS}
         self.db.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?)",
                         (rec.path, rec.size, rec.mtime, json.dumps(data)))
         if commit:
@@ -278,7 +278,7 @@ class Cache:
                                        (len(prefix), prefix)):
             try:
                 values = json.loads(data)
-                recs.append(Recording(**{k: values[k] for k in _CACHED_FIELDS if k in values}))
+                recs.append(Recording(**{k: values[k] for k in CACHED_FIELDS if k in values}))
             except (ValueError, TypeError):
                 continue
         return recs
@@ -359,17 +359,24 @@ class ScanStats:
     found: int = 0
     parsed: int = 0
     cached: int = 0
+    indexed: int = 0  # taken from the library's own index (library_index)
     errors: int = 0
     removed: int = 0
     seconds: float = 0.0
+    index_saved: bool = False  # the library index was written (set by the scan thread)
+    index_error: str = ""
 
 
 def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None],
          on_progress: Callable[[ScanStats, str], None] | None = None,
-         cancelled: Callable[[], bool] = lambda: False, batch_size: int = 250) -> ScanStats:
-    """Walk root, using the cache where size and mtime match. Recordings are
-    delivered in batches so the UI can fill while a first (slow) scan runs."""
+         cancelled: Callable[[], bool] = lambda: False, batch_size: int = 250,
+         index=None) -> ScanStats:
+    """Walk root, using the cache where size and mtime match, then the
+    library index (a library_index.LibraryIndex, optional). Recordings are
+    delivered in batches so the UI can fill while a first (slow) scan runs.
+    After a complete scan the index holds what was seen (it is not saved here)."""
     stats = ScanStats()
+    everything: list[Recording] = []
     started = time.monotonic()
     seen: set[str] = set()
     batch: list[Recording] = []
@@ -378,15 +385,22 @@ def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None]
         seen.add(path)
         stats.found += 1
         rec = cache.get(path, stat.st_size, stat.st_mtime)
+        if rec is None and index is not None:
+            rec = index.get(path, stat.st_size, stat.st_mtime)
+            if rec is not None:
+                cache.put(rec, commit=False)
+                stats.indexed += 1
+        elif rec is not None:
+            stats.cached += 1
         if rec is None:
             rec = read_recording(path, stat)
             cache.put(rec, commit=False)
             stats.parsed += 1
             if rec.error:
                 stats.errors += 1
-        else:
-            stats.cached += 1
         batch.append(rec)
+        if index is not None:
+            everything.append(rec)
         if len(batch) >= batch_size:
             cache.db.commit()
             on_batch(batch)
@@ -400,5 +414,7 @@ def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None]
         on_batch(batch)
     if not cancelled():
         stats.removed = cache.prune(root, seen)
+        if index is not None:
+            index.replace_all(everything)
     stats.seconds = time.monotonic() - started
     return stats

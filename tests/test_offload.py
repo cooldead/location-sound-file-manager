@@ -249,3 +249,24 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MacCardTests(unittest.TestCase):
+    def test_sd_card_is_a_card_and_ejects_the_whole_disk(self):
+        info = {"RemovableMedia": True, "BusProtocol": "Secure Digital", "ParentWholeDisk": "disk5",
+                "DeviceNode": "/dev/disk5s1", "VolumeName": "NO NAME", "TotalSize": 64_000_000_000}
+        card = offload.card_from_diskutil("/Volumes/NO NAME", info)
+        self.assertEqual(card, offload.Card("/Volumes/NO NAME", "NO NAME", 64_000_000_000, "/dev/disk5"))
+
+    def test_hard_disks_and_disk_images_are_not_cards(self):
+        usb_disk = {"RemovableMedia": False, "Ejectable": True, "Internal": False, "BusProtocol": "USB"}
+        image = {"RemovableMedia": True, "BusProtocol": "Disk Image"}
+        self.assertIsNone(offload.card_from_diskutil("/Volumes/Backup", usb_disk))
+        self.assertIsNone(offload.card_from_diskutil("/Volumes/Installer", image))
+        self.assertIsNone(offload.card_from_diskutil("/Volumes/Unknown", {}))
+
+    def test_mount_lines(self):
+        match = offload._MOUNT_LINE.match("/dev/disk4s1 on /Volumes/SD 2 (msdos, local, nodev, nosuid, noowners)")
+        self.assertEqual(match.group(1, 2), ("/dev/disk4s1", "/Volumes/SD 2"))
+        # Network shares are not /dev/ mounts, so they are never looked at.
+        self.assertIsNone(offload._MOUNT_LINE.match("//user@nas/share on /Volumes/share (smbfs, nodev, nosuid)"))

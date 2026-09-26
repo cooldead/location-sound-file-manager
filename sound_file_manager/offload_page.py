@@ -382,7 +382,7 @@ class OffloadPage(QWidget):
             self.open_card(card)
 
     def _browse(self):
-        folder = QFileDialog.getExistingDirectory(self, "Offload from folder", self.card.path if self.card else "/run/media")
+        folder = QFileDialog.getExistingDirectory(self, "Offload from folder", self.card.path if self.card else offload.MEDIA_FOLDER)
         if folder:
             card = offload.Card(folder, os.path.basename(folder) or folder)
             self.card_box.addItem(folder, card)

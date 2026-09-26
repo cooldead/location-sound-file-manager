@@ -460,13 +460,14 @@ def _write_in_place(path: str, bext: Chunk | None, description: bytes | None,
 
 def _copy_range(src, dst, offset: int, length: int) -> None:
     """Copy bytes between files; server-side on filesystems that support it
-    (SMB/CIFS, NFS, btrfs), otherwise through a buffer."""
+    (SMB/CIFS, NFS, btrfs), otherwise through a buffer. macOS has no
+    copy_file_range, so there it is always the buffer."""
     src.flush()
     dst.flush()
     dst_pos = dst.tell()
     copied = 0
     try:
-        while copied < length:
+        while copied < length and hasattr(os, "copy_file_range"):
             n = os.copy_file_range(src.fileno(), dst.fileno(), length - copied,
                                    offset + copied, dst_pos + copied)
             if n == 0:

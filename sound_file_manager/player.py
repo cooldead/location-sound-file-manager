@@ -8,13 +8,13 @@ import re
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QRunnable, QThreadPool, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QImage, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox, QScrollBar, QSizePolicy, QSplitter, QStyle,
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import bwf, settings, waveform
+from . import bwf, library_index, settings, waveform
 from .audio_engine import AudioEngine
 from .catalog import Cache, Recording
 from .markers import Marker, MarkerStore, default_name, next_marker
@@ -69,10 +69,12 @@ class _PeaksJob(QRunnable):
     A prefetch job only fills the cache and gives way as soon as another
     file is selected."""
 
-    def __init__(self, generation: int, rec: Recording, cache_file: str | None, is_current, prefetch=False):
+    def __init__(self, generation: int, rec: Recording, cache_file: str | None, is_current, prefetch=False,
+                 index: tuple[str, bool, bool] | None = None):
         super().__init__()
         self.generation, self.rec, self.cache_file, self.is_current = generation, rec, cache_file, is_current
         self.prefetch = prefetch
+        self.index = index  # (library root, read, write) for waveforms kept in the library index
         self.signals = _PeaksSignals()
 
     def run(self):
@@ -86,6 +88,17 @@ class _PeaksJob(QRunnable):
                     if not self.prefetch:
                         self.signals.done.emit(self.generation, levels, "")
                     return
+            root, read_index, write_index = self.index or ("", False, False)
+            if read_index:
+                # One small file instead of reading the whole WAV.
+                blob = library_index.read_levels(root, self.rec.path, self.rec.size, self.rec.mtime)
+                levels = waveform.from_bytes(blob) if blob else None
+                if levels is not None:
+                    if cache is not None:
+                        cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, blob)
+                    if not self.prefetch:
+                        self.signals.done.emit(self.generation, levels, "")
+                    return
             if not self.is_current(self.generation):
                 return
             peaks = waveform.compute_peaks(
@@ -94,8 +107,14 @@ class _PeaksJob(QRunnable):
                 cancelled=lambda: not self.is_current(self.generation))
             if peaks is None:
                 return
+            blob = waveform.to_bytes(peaks)
             if cache is not None:
-                cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, waveform.to_bytes(peaks))
+                cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, blob)
+            if write_index:
+                try:
+                    library_index.write_levels(root, self.rec.path, self.rec.size, self.rec.mtime, blob)
+                except OSError:
+                    pass  # only a speed-up; the local cache has it
             if not self.prefetch:
                 self.signals.done.emit(self.generation, peaks, "")
         except Exception as error:  # noqa: BLE001 - shown in the widget, never fatal
@@ -765,8 +784,8 @@ class PlayerWidget(QWidget):
         self.taller = tool("▲", "Taller waveform (vertical zoom)", lambda: self.wave.set_gain(self.wave.gain * 2))
         self.shorter = tool("▼", "Shorter waveform", lambda: self.wave.set_gain(self.wave.gain / 2))
 
-        mono = QFont("monospace")
-        mono.setStyleHint(QFont.StyleHint.Monospace)
+        # The system's fixed-width font: a family named "monospace" only exists on Linux.
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         mono.setBold(True)
         mono.setPointSizeF(self.font().pointSizeF() * 1.25)
         self.time_label = QLabel("00:00:00.00 / 00:00:00")
@@ -931,7 +950,8 @@ class PlayerWidget(QWidget):
         self._load_markers(rec)
         self._set_enabled(True)
         self._update_labels(start)
-        job = _PeaksJob(self._generation, rec, self.cache_file, lambda g: g == self._generation)
+        job = _PeaksJob(self._generation, rec, self.cache_file, lambda g: g == self._generation,
+                        index=self._index_for(rec))
         job.signals.partial.connect(self._on_peaks_partial)
         job.signals.done.connect(self._on_peaks_done)
         self._pool.start(job, 10)
@@ -1033,8 +1053,21 @@ class PlayerWidget(QWidget):
         generation = self._generation
         for rec in recs:
             if rec is not None and not rec.error:
-                self._pool.start(_PeaksJob(generation, rec, self.cache_file,
-                                           lambda g: g == self._generation, prefetch=True), 0)
+                self._pool.start(_PeaksJob(generation, rec, self.cache_file, lambda g: g == self._generation,
+                                           prefetch=True, index=self._index_for(rec)), 0)
+
+    def set_library_index(self, root: str, write: bool) -> None:
+        """Where waveforms may be kept in the library index: read when the
+        library has them (or they are being written), written when allowed."""
+        self._index_root = root or ""
+        self._index_write = bool(root) and write
+        self._index_read = self._index_write or (bool(root) and library_index.has_waveforms(root))
+
+    def _index_for(self, rec: Recording) -> tuple[str, bool, bool] | None:
+        root = getattr(self, "_index_root", "")
+        if not root or library_index.relative_key(root, rec.path) is None:
+            return None  # e.g. a card file on the Offload page
+        return root, self._index_read, self._index_write
 
     def release(self) -> tuple[Recording | None, float, bool]:
         """Close the file (before renaming/writing it). Returns what reload() needs."""

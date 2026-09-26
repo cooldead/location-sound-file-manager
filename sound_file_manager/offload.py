@@ -14,8 +14,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
+import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -28,6 +31,8 @@ SYSTEM_FOLDERS = {"SOUNDDEV", "SETTINGS", "TRASH", "MIDI_MAPPING", ".fseventsd",
 # Sound Devices moves takes marked false into this folder.
 FALSE_TAKES = "FALSETAKES"
 ROOT_FILES = "(files at card root)"
+# Where removable media are mounted (the Browse button starts here).
+MEDIA_FOLDER = "/Volumes" if sys.platform == "darwin" else "/run/media"
 
 
 @dataclass(frozen=True)
@@ -35,13 +40,15 @@ class Card:
     path: str
     label: str
     size: int = 0  # bytes, 0 if unknown
-    device: str = ""  # e.g. /dev/sdc1, for ejecting
+    device: str = ""  # e.g. /dev/sdc1 (Linux) or /dev/disk4 (macOS), for ejecting
 
 
 def removable_mounts() -> list[Card]:
     """Mounted filesystems on removable media (SD card readers, card-slot
     recorders connected over USB). Fixed and USB hard disks are not listed;
     those can still be chosen with Browse."""
+    if sys.platform == "darwin":
+        return _mac_removable_mounts()
     try:
         out = subprocess.run(["lsblk", "-J", "-b", "-o", "PATH,MOUNTPOINT,RM,LABEL,SIZE"],
                              capture_output=True, text=True, timeout=5).stdout
@@ -61,6 +68,58 @@ def removable_mounts() -> list[Card]:
 
     walk(devices)
     return cards
+
+
+# "/dev/disk4s1 on /Volumes/NO NAME (msdos, local, nodev, ...)"
+_MOUNT_LINE = re.compile(r"^(/dev/\S+) on (.+) \(([^)]*)\)$")
+# diskutil answers per device node; a card keeps its node while it is mounted.
+_diskutil_cache: dict[str, dict] = {}
+
+
+def _mac_removable_mounts() -> list[Card]:
+    """macOS: local mounts from `mount` (network shares are skipped without
+    touching them, so a slow NAS never stalls the 3 s card poll), then
+    `diskutil info` for each new device, cached."""
+    try:
+        out = subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    cards, seen = [], set()
+    for line in out.splitlines():
+        match = _MOUNT_LINE.match(line)
+        if not match or not match.group(2).startswith("/Volumes/"):
+            continue
+        node, mount = match.group(1), match.group(2)
+        seen.add(node)
+        if node not in _diskutil_cache:
+            _diskutil_cache[node] = _diskutil_info(node)
+        card = card_from_diskutil(mount, _diskutil_cache[node])
+        if card is not None:
+            cards.append(card)
+    for node in set(_diskutil_cache) - seen:
+        del _diskutil_cache[node]
+    return cards
+
+
+def _diskutil_info(target: str) -> dict:
+    try:
+        out = subprocess.run(["diskutil", "info", "-plist", target], capture_output=True, timeout=10).stdout
+        info = plistlib.loads(out)
+        return info if isinstance(info, dict) else {}
+    except (OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException):
+        return {}
+
+
+def card_from_diskutil(mount: str, info: dict) -> Card | None:
+    """A Card for a volume on removable media (what lsblk calls RM=1): SD
+    slots and readers, recorders in USB mode. External hard disks and disk
+    images are not cards."""
+    if info.get("BusProtocol") == "Disk Image" or not (
+            info.get("RemovableMedia") or info.get("BusProtocol") == "Secure Digital"):
+        return None
+    whole = info.get("ParentWholeDisk") or ""
+    return Card(mount, info.get("VolumeName") or os.path.basename(mount), int(info.get("TotalSize") or 0),
+                f"/dev/{whole}" if whole else info.get("DeviceNode") or "")
 
 
 def looks_like_card(path: str) -> bool:
@@ -92,6 +151,13 @@ def eject(card: Card) -> str:
     """Unmount the card and power the reader slot down. Returns "" or an error."""
     if not card.device:
         return "the device of this card is not known"
+    if sys.platform == "darwin":
+        # Ejecting the whole disk unmounts every volume on it and releases the reader.
+        try:
+            done = subprocess.run(["diskutil", "eject", card.device], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as error:
+            return str(error)
+        return "" if done.returncode == 0 else (done.stderr or done.stdout).strip()
     for args in (["udisksctl", "unmount", "-b", card.device], ["udisksctl", "power-off", "-b", card.device]):
         try:
             done = subprocess.run(args, capture_output=True, text=True, timeout=30)

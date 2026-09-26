@@ -1,6 +1,6 @@
 # Location Sound File Manager
 
-A Linux desktop app for browsing a library of production sound recordings: WAV/BWF files from field recorders such as the Sound Devices 8-series and Zoom F-series. It reads the metadata the recorders embed, groups recordings by project, plays them with a per-channel waveform, and lets you rename, re-tag and reorganise them. Every change is previewed first and can be undone.
+A desktop app for Linux and macOS for browsing a library of production sound recordings: WAV/BWF files from field recorders such as the Sound Devices 8-series and Zoom F-series. It reads the metadata the recorders embed, groups recordings by project, plays them with a per-channel waveform, and lets you rename, re-tag and reorganise them. Every change is previewed first and can be undone.
 
 ## First run
 
@@ -24,6 +24,7 @@ The **Offload Card** page (Ctrl+1) follows the day-after-the-shoot routine step 
 ## Features
 
 - **Scan a library folder**, including network shares. The first scan reads each file's headers; after that, results are cached, so rescans only check sizes and dates. The window fills in while a scan runs.
+- **Library index** (Settings, off by default): keeps what the scan read from every file in a hidden `.sfm-index` folder in the library (a few MB), so another computer, or this one after its cache is cleared, doesn't open every file again on its first scan (over Wi-Fi that is the slow part). An index already in a library is always used, and an entry is only trusted while its file's size and date are unchanged. Optionally the **waveforms** are kept there too, so they draw at once on another computer; that takes about 8 KB per track per file (roughly 30 KB per recording, several hundred MB for a large library), and the app shows the estimate and free space before turning it on.
 - **Grouped by project.** The project comes from the file's iXML metadata. Files without one fall back to their folder name, shown in grey italics. The sidebar lists projects **by year, then month** (newest first; only months with recordings), then the projects recorded that month and their days. Click a year or month to see all its recordings; right-click it for one sound report per project. The numbers count **projects** by default; the **#** button next to the box switches to counting files, or both (tooltips always show both). Switch to an A–Z project list with the box above the sidebar.
 - **Metadata columns:** scene, take, circled ★, start timecode (frame-accurate, including drop frame), length, channels, track names, format, frame rate, date/time, note, recorder, folder. Right-click the header to show or hide columns. Search matches names, scenes, takes, notes, track names and timecode.
 - **Player:** selecting a file loads it paused. Nothing plays until you press Space or Play, or double-click. Transport: play/pause, stop, loop (L), previous/next file, a position counter and the timecode at the playhead.
@@ -82,7 +83,9 @@ The **Offload Card** page (Ctrl+1) follows the day-after-the-shoot routine step 
 
 ## Install and run
 
-Linux only (developed on CachyOS / KDE Plasma, Wayland). Needs Python 3.11+, PySide6 (Qt 6) with Qt Multimedia, and numpy. On Arch/CachyOS:
+### Linux
+
+Developed on CachyOS / KDE Plasma, Wayland. Needs Python 3.11+, PySide6 (Qt 6) with Qt Multimedia, and numpy. On Arch/CachyOS:
 
 ```sh
 sudo pacman -S pyside6 qt6-multimedia qt6-multimedia-ffmpeg python-numpy
@@ -99,6 +102,20 @@ python3 -m unittest        # tests
 ```
 
 Card detection uses `lsblk`, and ejecting uses `udisksctl` (both are standard on desktop Linux).
+
+### macOS
+
+Needs macOS 12 or later and Python 3.11+ (for example `brew install python`). To build a self-contained app (Python, Qt and numpy inside, about 130 MB):
+
+```sh
+git clone https://github.com/cooldead/location-sound-file-manager
+cd location-sound-file-manager
+macos/build_app.sh --install   # builds dist/Location Sound File Manager.app and copies it to ~/Applications
+```
+
+The script makes a private `.venv` in the project folder; `./run.sh` uses it too, so you can also start the app from the folder, and `.venv/bin/python -m unittest` runs the tests. The first time the app reads a card or a network share, macOS asks for permission.
+
+Cards are found with `diskutil` (volumes on removable media such as SD slots and readers). Ejecting ejects the whole card. Shortcuts use ⌘ where Linux uses Ctrl. Settings, history and markers are kept in `~/Library/Application Support/location-sound-file-manager/`, and the scan cache in `~/Library/Caches/location-sound-file-manager/`.
 
 ## License
 
