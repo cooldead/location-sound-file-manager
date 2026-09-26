@@ -2,6 +2,15 @@
 
 A desktop app for Linux and macOS for browsing a library of production sound recordings: WAV/BWF files from field recorders such as the Sound Devices 8-series and Zoom F-series. It reads the metadata the recorders embed, groups recordings by project, plays them with a per-channel waveform, and lets you rename, re-tag and reorganise them. Every change is previewed first and can be undone.
 
+## Download
+
+| Platform | Release | Download |
+|---|---|---|
+| **Linux** | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). |
+| **macOS** (Apple silicon) | [v1.2.1 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.2.1) | `Location-Sound-File-Manager-1.2.1-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
+
+The Mac app is built separately, so it can be a version behind: the Linux release and the source have the newest features. To get them on a Mac now, build the app from the source ([macOS](#macos)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
+
 ## First run
 
 The first start opens a **Setup** window (available again later under *Settings ▸ Setup…*):
@@ -95,7 +104,16 @@ Developed on CachyOS / KDE Plasma, Wayland. Needs Python 3.11+, PySide6 (Qt 6) w
 sudo pacman -S pyside6 qt6-multimedia qt6-multimedia-ffmpeg python-numpy
 ```
 
-Then:
+Then get the app, either the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux):
+
+```sh
+tar xzf Location-Sound-File-Manager-1.4.0-linux.tar.gz
+cd location-sound-file-manager-1.4.0
+./install.sh               # adds it to the application menu
+./run.sh [library-folder]  # or start it directly
+```
+
+or the source, which `git pull` keeps up to date:
 
 ```sh
 git clone https://github.com/cooldead/location-sound-file-manager
