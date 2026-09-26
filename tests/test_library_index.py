@@ -51,6 +51,19 @@ class LibraryIndexTests(unittest.TestCase):
         self.assertEqual([r.take for r in sorted(recs2, key=lambda r: r.path)], ["01", "02"])
         self.assertFalse(index2.changed)
 
+    def test_use_off_reads_the_files_but_keeps_the_index_current(self):
+        index = LibraryIndex.load(self.root)
+        self.scan(self.root, "a.sqlite", index)
+        index.save()
+        index2 = LibraryIndex.load(self.root)
+        cache = catalog.Cache(os.path.join(self.tmp, "b.sqlite"))
+        try:
+            stats = catalog.scan(self.root, cache, on_batch=lambda b: None, index=index2, read_index=False)
+        finally:
+            cache.close()
+        self.assertEqual((stats.parsed, stats.indexed), (2, 0))
+        self.assertFalse(index2.changed)  # nothing new to write
+
     def test_a_changed_file_is_read_again(self):
         index = LibraryIndex.load(self.root)
         self.scan(self.root, "a.sqlite", index)
@@ -124,3 +137,42 @@ class LibraryIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WalkTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.join(self.tmp, "lib")
+        for project in ("A", "B", "C"):
+            for day in ("250101", "250102"):
+                os.makedirs(os.path.join(self.root, project, day))
+                for take in ("01", "02"):
+                    make_wav(os.path.join(self.root, project, day, f"1T{take}_ISO.wav"), take=take)
+        os.makedirs(os.path.join(self.root, ".hidden"))
+        make_wav(os.path.join(self.root, ".hidden", "x.wav"))
+
+    def tearDown(self):
+        for folder, dirs, _ in os.walk(self.tmp):
+            for d in dirs:
+                os.chmod(os.path.join(folder, d), 0o755)
+        shutil.rmtree(self.tmp)
+
+    def test_parallel_walk_finds_what_the_serial_walk_finds(self):
+        serial = sorted(p for p, _ in catalog.walk_audio(self.root, workers=1))
+        parallel = sorted(p for p, _ in catalog.walk_audio(self.root, workers=8))
+        self.assertEqual(len(serial), 12)
+        self.assertEqual(parallel, serial)
+
+    def test_an_unreadable_folder_does_not_forget_its_files(self):
+        cache = catalog.Cache(os.path.join(self.tmp, "c.sqlite"))
+        try:
+            catalog.scan(self.root, cache, on_batch=lambda b: None)
+            os.chmod(os.path.join(self.root, "B"), 0)  # like a folder the share failed to list
+            index = LibraryIndex.load(self.root)
+            stats = catalog.scan(self.root, cache, on_batch=lambda b: None, index=index)
+            self.assertEqual(stats.unlisted, [os.path.join(self.root, "B")])
+            self.assertEqual((stats.found, stats.removed), (8, 0))
+            self.assertEqual(len(cache.all_under(self.root)), 12)
+            self.assertFalse(index.changed)  # not written from an incomplete walk
+        finally:
+            cache.close()

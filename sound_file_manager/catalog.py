@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, fields
 from fractions import Fraction
 from pathlib import Path
@@ -331,8 +332,67 @@ def is_audio_file(name: str) -> bool:
     return not name.startswith("._") and os.path.splitext(name)[1].lower() in AUDIO_EXTENSIONS
 
 
-def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False):
-    """Yield (path, stat) for every audio file below root, skipping hidden folders."""
+# How many folder listings and file checks are in flight at once. Each one
+# mostly waits for the network: over Wi-Fi to a NAS (12 ms a round trip) a
+# walk of 16,700 files took 273 s one at a time and 70 s with 16 (more did not
+# help). On a local disk it changes little.
+WALK_WORKERS = 16
+
+
+def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False, *,
+               failed: list[str] | None = None, workers: int = WALK_WORKERS):
+    """Yield (path, stat) for every audio file below root, skipping hidden
+    folders. Folders are listed and files checked in parallel, so the order
+    is not fixed. Folders that could not be listed are added to `failed`."""
+    if workers <= 1:
+        yield from _walk_audio_serial(root, cancelled, failed)
+        return
+    stat_pool = ThreadPoolExecutor(workers, thread_name_prefix="stat")
+
+    def stat_entry(entry):
+        try:
+            return entry.path, entry.stat()
+        except OSError:
+            return None  # gone since it was listed
+
+    def list_folder(folder):
+        try:
+            with os.scandir(folder) as entries:
+                items = sorted(entries, key=lambda e: e.name.casefold())
+        except OSError:
+            return folder, None, []
+        subfolders, audio = [], []
+        for entry in items:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if not entry.name.startswith(".") and entry.name != REMOVED_FOLDER:
+                        subfolders.append(entry.path)
+                elif entry.is_file() and is_audio_file(entry.name):
+                    audio.append(entry)
+            except OSError:
+                continue
+        found = [x for x in stat_pool.map(stat_entry, audio) if x is not None] if not cancelled() else []
+        return folder, subfolders, found
+
+    pool = ThreadPoolExecutor(workers, thread_name_prefix="list")
+    try:
+        pending = {pool.submit(list_folder, root)}
+        while pending and not cancelled():
+            done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+            for future in done:
+                folder, subfolders, found = future.result()
+                if subfolders is None:
+                    if failed is not None:
+                        failed.append(folder)
+                    continue
+                yield from found
+                pending |= {pool.submit(list_folder, sub) for sub in subfolders}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+        stat_pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _walk_audio_serial(root: str, cancelled: Callable[[], bool], failed: list[str] | None):
     stack = [root]
     while stack and not cancelled():
         folder = stack.pop()
@@ -340,6 +400,8 @@ def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False):
             with os.scandir(folder) as entries:
                 items = sorted(entries, key=lambda e: e.name.casefold())
         except OSError:
+            if failed is not None:
+                failed.append(folder)
             continue
         subfolders = []
         for entry in items:
@@ -363,6 +425,7 @@ class ScanStats:
     errors: int = 0
     removed: int = 0
     seconds: float = 0.0
+    unlisted: list[str] = field(default_factory=list)  # folders that could not be read (e.g. the share dropped)
     index_saved: bool = False  # the library index was written (set by the scan thread)
     index_error: str = ""
 
@@ -370,9 +433,10 @@ class ScanStats:
 def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None],
          on_progress: Callable[[ScanStats, str], None] | None = None,
          cancelled: Callable[[], bool] = lambda: False, batch_size: int = 250,
-         index=None) -> ScanStats:
+         index=None, read_index: bool = True) -> ScanStats:
     """Walk root, using the cache where size and mtime match, then the
-    library index (a library_index.LibraryIndex, optional). Recordings are
+    library index (a library_index.LibraryIndex, optional; with read_index
+    off it is only brought up to date, not used). Recordings are
     delivered in batches so the UI can fill while a first (slow) scan runs.
     After a complete scan the index holds what was seen (it is not saved here)."""
     stats = ScanStats()
@@ -381,11 +445,11 @@ def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None]
     seen: set[str] = set()
     batch: list[Recording] = []
     last_report = 0.0
-    for path, stat in walk_audio(root, cancelled):
+    for path, stat in walk_audio(root, cancelled, failed=stats.unlisted):
         seen.add(path)
         stats.found += 1
         rec = cache.get(path, stat.st_size, stat.st_mtime)
-        if rec is None and index is not None:
+        if rec is None and index is not None and read_index:
             rec = index.get(path, stat.st_size, stat.st_mtime)
             if rec is not None:
                 cache.put(rec, commit=False)
@@ -412,7 +476,10 @@ def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None]
     cache.db.commit()
     if batch:
         on_batch(batch)
-    if not cancelled():
+    # Files are only forgotten after a complete walk: a folder that could not
+    # be listed (Wi-Fi dropped for a moment) would otherwise lose its files,
+    # which the next scan then has to read again.
+    if not cancelled() and not stats.unlisted:
         stats.removed = cache.prune(root, seen)
         if index is not None:
             index.replace_all(everything)

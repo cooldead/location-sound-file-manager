@@ -26,6 +26,7 @@ from .offload import human_size
 from .renamer import validate_name
 
 ITEM_ROLE = Qt.ItemDataRole.UserRole + 30
+LOCATION_ROLE = Qt.ItemDataRole.UserRole + 31  # a group's folder row: that folder
 NEW_FOLDER = "\0new"  # the "New folder…" entry of the keep folder list
 RED = QColor("#d13438")
 
@@ -156,6 +157,7 @@ class DuplicatesWindow(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_files_tab(), "Duplicate Files")
         self.tabs.addTab(self._build_projects_tab(), "Duplicate Projects")
+        self.tabs.addTab(self._build_nested_tab(), "Nested Folders")
         review = QPushButton("Review && Delete…")
         review.setToolTip(f"See what is in “{REMOVED_FOLDER}” and the files marked “{duplicates.REVIEW_TAG}”, "
                           "put files back or delete them for good")
@@ -629,12 +631,18 @@ class DuplicatesWindow(QDialog):
                     inside = group.files_in(location)
                     names = sorted({r.project for r in inside})
                     child = QTreeWidgetItem([_relative(location, root) or "(library)", str(len(inside))])
-                    child.setToolTip(0, location + ("\nProjects: " + ", ".join(names) if names else ""))
-                    child.setFlags(child.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                    child.setToolTip(0, location + ("\nProjects: " + ", ".join(names) if names else "")
+                                     + "\nClick to keep this folder")
+                    child.setData(0, LOCATION_ROLE, location)
                     item.addChild(child)
                 header.addChild(item)
+                item.setExpanded(True)  # the folders are what the choice is about
             header.setExpanded(True)
         self.projects_tree.blockSignals(False)
+        # Select the first group, so the keep folder and name are filled in at once.
+        first = next((item for _, item in self._group_items()), None)
+        if first is not None:
+            self.projects_tree.setCurrentItem(first)
         self._update_batch_button()
         self.projects_status.setText(f"{len(self.project_groups)} group(s) found. Pick one to merge it, or check "
                                      "several and use Merge Checked." if self.project_groups
@@ -695,9 +703,16 @@ class DuplicatesWindow(QDialog):
             self.find_projects()
 
     def _selected_group(self) -> duplicates.ProjectGroup | None:
+        """The group of the current row; a folder row belongs to its group.
+        (On macOS a click makes any row current, also a folder row, which used
+        to leave the keep folder empty.)"""
         item = self.projects_tree.currentItem()
-        group = item.data(0, ITEM_ROLE) if item is not None else None
-        return group if isinstance(group, duplicates.ProjectGroup) else None
+        while item is not None:
+            group = item.data(0, ITEM_ROLE)
+            if isinstance(group, duplicates.ProjectGroup):
+                return group
+            item = item.parent()
+        return None
 
     def _project_selected(self):
         group = self._selected_group()
@@ -714,7 +729,9 @@ class DuplicatesWindow(QDialog):
                 any(p.casefold() in {c.casefold() for c in containers} for p in _relative(f, root).split("/")),
                 -len(group.files_in(f)), f.count("/")))
             for folder in ranked:
-                self.target_folder.addItem(f"{_relative(folder, root)}  ({len(group.files_in(folder))} files)", folder)
+                count = len(group.files_in(folder))
+                self.target_folder.addItem(f"{_relative(folder, root)}  ({count} file{'' if count == 1 else 's'})",
+                                           folder)
                 self.target_folder.setItemData(self.target_folder.count() - 1, folder, Qt.ItemDataRole.ToolTipRole)
             self.target_folder.addItem("New folder…", NEW_FOLDER)
             self.target_folder.setItemData(self.target_folder.count() - 1,
@@ -726,6 +743,11 @@ class DuplicatesWindow(QDialog):
                     self.target_name.addItem(name)
         self.name_label.setVisible(group is not None and group.retag)
         self.target_name.setVisible(group is not None and group.retag)
+        # A click on one of the group's folders keeps that folder.
+        current = self.projects_tree.currentItem()
+        location = current.data(0, LOCATION_ROLE) if current is not None else None
+        if group is not None and location and self.target_folder.findData(location) >= 0:
+            self.target_folder.setCurrentIndex(self.target_folder.findData(location))
         self.target_folder.blockSignals(False)
         self.target_name.blockSignals(False)
         self._new_folder_edited = False
@@ -749,8 +771,11 @@ class DuplicatesWindow(QDialog):
         if problem:
             self.new_folder_path.setText(f"<span style='color:{RED.name()}'>{problem}</span>")
         elif os.path.isdir(path):
+            typed = os.path.join(self.root_getter(), *[p.strip() for p in self.new_folder.text().split("/") if p.strip()])
+            case = ("<br>The share ignores upper/lower case, so this is the existing folder with that name."
+                    if os.path.normpath(typed) != os.path.normpath(path) else "")
             self.new_folder_path.setText(f"<b>{path}</b><br>This folder already exists; the files are merged "
-                                         "into it.")
+                                         "into it." + case)
         else:
             self.new_folder_path.setText(f"Will be created at: <b>{path}</b>")
         self.new_folder_path.setToolTip(path)
@@ -773,7 +798,7 @@ class DuplicatesWindow(QDialog):
         for part in parts:
             if part in (".", "..") or validate_name(part):
                 return "", f"“{part}” can't be used as a folder name."
-        return os.path.join(self.root_getter(), *parts), ""
+        return _existing_spelling(self.root_getter(), parts), ""
 
     def _clear_plan(self):
         self.plan = []
@@ -875,6 +900,204 @@ class DuplicatesWindow(QDialog):
         self.cleanupRequested.emit(Cleanup(f"merge of {' / '.join(group.names)}", removals, moves, retags,
                                            permanent, remove_empty, review, different, replacing))
 
+    # ------------------------------------------------------------ nested folders tab
+
+    def _build_nested_tab(self) -> QWidget:
+        page = QWidget()
+        self.find_nested_button = QPushButton("Find Nested Folders")
+        self.find_nested_button.clicked.connect(self.find_nested)
+        self.nested_status = QLabel("Finds folders inside a folder with the same name, e.g. "
+                                    "Project/250101/250101 (a day folder copied into itself), so the files can "
+                                    "be moved up and the structure stays Project/Day/files.")
+        self.nested_status.setWordWrap(True)
+        top = QHBoxLayout()
+        top.addWidget(self.find_nested_button)
+        top.addWidget(self.nested_status, 1)
+
+        self.nested_tree = QTreeWidget()
+        self.nested_tree.setHeaderLabels(["Nested folder", "Files inside", "Already there", "New", "In the way"])
+        self.nested_tree.setRootIsDecorated(False)
+        self.nested_tree.header().setStretchLastSection(False)
+        self.nested_tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3, 4):
+            self.nested_tree.header().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.nested_tree.currentItemChanged.connect(lambda *_: self._nested_selected())
+        self.nested_tree.itemChanged.connect(lambda *_: self._update_nested_buttons())
+        for col, tip in ((2, "Files the outer folder already has (the same recording at the same place): "
+                             "removed from the inner folder after a byte for byte check"),
+                         (3, "Files only in the inner folder: moved up into the outer folder"),
+                         (4, "A different file with the same name is already in the outer folder: left alone")):
+            self.nested_tree.headerItem().setToolTip(col, tip)
+        check_all = QPushButton("Check All")
+        check_all.clicked.connect(lambda: self._check_nested(True))
+        uncheck = QPushButton("Uncheck All")
+        uncheck.clicked.connect(lambda: self._check_nested(False))
+        self.nested_batch_button = QPushButton("Merge Checked…")
+        self.nested_batch_button.setEnabled(False)
+        self.nested_batch_button.setToolTip("Merge every checked nested folder into its outer folder, as one "
+                                            "undo step")
+        self.nested_batch_button.clicked.connect(lambda: self.merge_nested(self._checked_nested()))
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.nested_tree, 1)
+        row = QHBoxLayout()
+        row.addWidget(check_all)
+        row.addWidget(uncheck)
+        row.addStretch(1)
+        row.addWidget(self.nested_batch_button)
+        left_layout.addLayout(row)
+
+        self.nested_plan_tree = QTreeWidget()
+        self.nested_plan_tree.setHeaderLabels(["Action", "File", "To / why"])
+        self.nested_plan_tree.setRootIsDecorated(False)
+        self.nested_plan_tree.setColumnWidth(0, 90)
+        self.nested_plan_tree.setColumnWidth(1, 360)
+        self.nested_summary = QLabel()
+        self.nested_summary.setWordWrap(True)
+        self.nested_merge_button = QPushButton("Merge…")
+        self.nested_merge_button.setEnabled(False)
+        self.nested_merge_button.clicked.connect(
+            lambda: self.merge_nested([self._current_nested()] if self._current_nested() else []))
+        explain = QLabel("The files of the inner folder move up one level. A file the outer folder already has "
+                         "is removed (after a byte for byte check); a copy with notes the outer one lacks takes "
+                         "its place; nothing is overwritten. Nothing changes until you press Merge.")
+        explain.setWordWrap(True)
+        explain.setEnabled(False)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(self.nested_merge_button)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(explain)
+        right_layout.addLayout(buttons)
+        right_layout.addWidget(self.nested_plan_tree, 1)
+        right_layout.addWidget(self.nested_summary)
+
+        split = QSplitter()
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setSizes([560, 660])
+        layout = QVBoxLayout(page)
+        layout.addLayout(top)
+        layout.addWidget(split, 1)
+        return page
+
+    def find_nested(self):
+        recs, root = self.recs_getter(), self.root_getter()
+        found = duplicates.find_nested_folders(recs, root)
+        self.nested_tree.blockSignals(True)
+        self.nested_tree.clear()
+        for nested in found:
+            same, new, clash = nested.counts()
+            item = QTreeWidgetItem([_relative(nested.inner, root), str(len(nested.inner_files)), str(same),
+                                    str(new), str(clash) if clash else ""])
+            item.setData(0, ITEM_ROLE, nested)
+            item.setToolTip(0, f"{nested.inner}\ninside {nested.outer} ({len(nested.outer_files)} other files)")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            for col in (1, 2, 3, 4):
+                item.setTextAlignment(col, Qt.AlignmentFlag.AlignRight)
+            if clash:
+                item.setForeground(4, QBrush(RED))
+            self.nested_tree.addTopLevelItem(item)
+        self.nested_tree.blockSignals(False)
+        self.nested_status.setText(f"{len(found)} nested folder(s) found. Pick one to see what merging it does, "
+                                   "or check several and use Merge Checked." if found
+                                   else "No nested folders found.")
+        if found:
+            self.nested_tree.setCurrentItem(self.nested_tree.topLevelItem(0))
+        else:
+            self._nested_selected()
+        self._update_nested_buttons()
+
+    def _current_nested(self) -> duplicates.NestedFolder | None:
+        item = self.nested_tree.currentItem()
+        nested = item.data(0, ITEM_ROLE) if item is not None else None
+        return nested if isinstance(nested, duplicates.NestedFolder) else None
+
+    def _checked_nested(self) -> list[duplicates.NestedFolder]:
+        return [self.nested_tree.topLevelItem(i).data(0, ITEM_ROLE) for i in range(self.nested_tree.topLevelItemCount())
+                if self.nested_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked]
+
+    def _check_nested(self, on: bool):
+        for i in range(self.nested_tree.topLevelItemCount()):
+            self.nested_tree.topLevelItem(i).setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+    def _update_nested_buttons(self):
+        count = len(self._checked_nested())
+        self.nested_batch_button.setText(f"Merge Checked ({count})…" if count else "Merge Checked…")
+        self.nested_batch_button.setEnabled(bool(count))
+
+    def _nested_selected(self):
+        nested = self._current_nested()
+        root = self.root_getter()
+        self.nested_plan_tree.clear()
+        if nested is None:
+            self.nested_summary.setText("")
+            self.nested_merge_button.setEnabled(False)
+            return
+        plan = duplicates.plan_nested_merge(nested, self.recs_getter())
+        labels = {"remove": "remove", "move": "move up", "skip": "skip", "differs": "different", "replace": "replace"}
+        for action in plan:
+            item = QTreeWidgetItem([labels[action.kind], _relative(action.rec.path, nested.outer),
+                                    f"{_relative(action.dst, root)}  ·  {action.reason}"])
+            item.setToolTip(1, action.rec.path)
+            if action.kind in ("skip", "differs"):
+                for col in range(3):
+                    item.setForeground(col, QBrush(RED))
+            self.nested_plan_tree.addTopLevelItem(item)
+        self.nested_summary.setText(self._nested_summary(plan, [nested]))
+        self.nested_merge_button.setEnabled(any(a.kind != "skip" for a in plan))
+
+    def _nested_summary(self, plan: list[duplicates.Action], nested: list[duplicates.NestedFolder]) -> str:
+        counts = {k: sum(1 for a in plan if a.kind == k) for k in ("remove", "move", "replace", "differs", "skip")}
+        freed = sum(a.rec.size for a in plan if a.kind == "remove")
+        text = f"{counts['remove']} already there, removed ({human_size(freed)}), {counts['move']} moved up"
+        if counts["replace"]:
+            text += f", {counts['replace']} with notes take the outer copy's place"
+        if counts["differs"]:
+            text += (f", <span style='color:#d13438'><b>{counts['differs']} different</b></span> (the same "
+                     "recording with other notes or names: left alone, or kept next to it for review, you choose)")
+        if counts["skip"]:
+            text += f", <span style='color:#d13438'><b>{counts['skip']} skipped</b></span> (a different file is in the way)"
+        # Moves only move audio files, so anything else keeps the inner folder.
+        others = 0
+        for folder in (n.inner for n in nested):
+            for _, _, names in os.walk(folder):
+                others += sum(1 for n in names if not catalog.is_audio_file(n)
+                              and n not in (".take_folder", ".daily_folder", ".DS_Store"))
+        if others:
+            text += (f". {others} other file(s) (not audio, e.g. recorder reports) stay in the inner folder, so it "
+                     "is not removed")
+        return text + "."
+
+    def merge_nested(self, nested: list[duplicates.NestedFolder]):
+        nested = [n for n in nested if n is not None]
+        if not nested:
+            return
+        recs = self.recs_getter()
+        plan = [a for n in nested for a in duplicates.plan_nested_merge(n, recs)]
+        removals = [(a.rec, a.dst, a.level) for a in plan if a.kind == "remove"]
+        moves = [(a.rec, a.dst) for a in plan if a.kind == "move"]
+        different = [(a.rec, a.dst) for a in plan if a.kind == "differs"]
+        replacing = [(a.rec, a.other, a.level) for a in plan if a.kind == "replace"]
+        if not (removals or moves or different or replacing):
+            QMessageBox.information(self, "Nested folders", "Nothing to do: every file is skipped.")
+            return
+        ok, permanent, remove_empty, review = confirm_removal(
+            self, len(removals) + len(replacing), sum(r.size for r, _, _ in removals) +
+            sum(rep[1].size for rep in replacing), len(moves), 0, len(different))
+        if not ok:
+            return
+        root = self.root_getter()
+        label = ("merge of nested folder " + _relative(nested[0].inner, root) if len(nested) == 1
+                 else f"merge of {len(nested)} nested folders")
+        self._rescan_nested_after = True
+        self.cleanupRequested.emit(Cleanup(label, removals, moves, [], permanent, remove_empty, review, different,
+                                           replacing))
+
     # ------------------------------------------------------------ after a cleanup
 
     def cleanup_finished(self):
@@ -886,6 +1109,12 @@ class DuplicatesWindow(QDialog):
         self._update_files_summary()
         self.files_status.setText("Done. Scan again to see what is left.")
         self.projects_status.setText("Done. Find again to see what is left.")
+        self.nested_tree.clear()
+        self._nested_selected()
+        self._update_nested_buttons()
+        if getattr(self, "_rescan_nested_after", False):
+            self._rescan_nested_after = False
+            self.find_nested()
         if getattr(self, "_rescan_projects_after", False):
             # After a merge, show what is left straight away (this takes a second).
             self._rescan_projects_after = False
@@ -896,6 +1125,24 @@ class DuplicatesWindow(QDialog):
         if self._worker is not None:
             self._worker.wait(5000)
         super().closeEvent(event)
+
+
+def _existing_spelling(root: str, parts: list[str]) -> str:
+    """root/parts as written on disk. On a share (or Mac disk) that ignores
+    upper/lower case, "Night Shift" is the existing "NIGHT SHIFT" folder;
+    planning with the typed spelling would "move" files onto themselves and
+    promise a folder name that never appears."""
+    path = root
+    for part in parts:
+        try:
+            with os.scandir(path) as entries:
+                names = [e.name for e in entries if e.is_dir()]
+        except OSError:
+            names = []
+        if part not in names:
+            part = next((n for n in names if n.casefold() == part.casefold()), part)
+        path = os.path.join(path, part)
+    return path
 
 
 def _relative(path: str, root: str) -> str:

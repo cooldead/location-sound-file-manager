@@ -1056,12 +1056,12 @@ class PlayerWidget(QWidget):
                 self._pool.start(_PeaksJob(generation, rec, self.cache_file, lambda g: g == self._generation,
                                            prefetch=True, index=self._index_for(rec)), 0)
 
-    def set_library_index(self, root: str, write: bool) -> None:
-        """Where waveforms may be kept in the library index: read when the
-        library has them (or they are being written), written when allowed."""
+    def set_library_index(self, root: str, read: bool, write: bool) -> None:
+        """Waveforms in the library index (the Settings "Use" and "Update"
+        options): read only when the library has any, written when allowed."""
         self._index_root = root or ""
         self._index_write = bool(root) and write
-        self._index_read = self._index_write or (bool(root) and library_index.has_waveforms(root))
+        self._index_read = bool(root) and read and (write or library_index.has_waveforms(root))
 
     def _index_for(self, rec: Recording) -> tuple[str, bool, bool] | None:
         root = getattr(self, "_index_root", "")

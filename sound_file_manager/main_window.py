@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         self.h_split.setStretchFactor(2, 0)
         self.h_split.setSizes([260, 900, 320])
 
-        self.offload = OffloadPage(self.qsettings, lambda: self.root, self)
+        self.offload = OffloadPage(self.qsettings, lambda: self.root, self, library_recs=lambda: list(self.model.recs))
         self.offload.recordingSelected.connect(self._offload_selected)
         self.offload.copiedToLibrary.connect(self._copied_to_library)
         self.offload.showInLibrary.connect(self.show_folder_in_library)
@@ -411,11 +411,13 @@ class MainWindow(QMainWindow):
         self._index_waveforms_setting()
         self.offload._fill_destinations()
         self.offload._destination_changed()
+        self.offload.library_ready()
         self.start_scan()
 
     def _index_waveforms_setting(self):
-        write = settings.get(self.qsettings, "library_index") and settings.get(self.qsettings, "library_index_waveforms")
-        self.player.set_library_index(self.root if self.root and os.path.isdir(self.root) else "", write)
+        self.player.set_library_index(self.root if self.root and os.path.isdir(self.root) else "",
+                                      settings.get(self.qsettings, "library_index_waveforms_read"),
+                                      settings.get(self.qsettings, "library_index_waveforms"))
 
     def _assign(self, recs):
         catalog.assign_projects(recs, self.root, settings.get(self.qsettings, "container_folders"))
@@ -432,6 +434,7 @@ class MainWindow(QMainWindow):
             return
         self._scan_seen = set()
         self.scan_thread = ScanThread(self.root, self.cache_file, self,
+                                      read_index=settings.get(self.qsettings, "library_index_read"),
                                       write_index=settings.get(self.qsettings, "library_index"))
         self.scan_thread.batch.connect(self._scan_batch)
         self.scan_thread.progress.connect(self._scan_progress)
@@ -463,7 +466,9 @@ class MainWindow(QMainWindow):
             self._update_status()
 
     def _scan_progress(self, stats, path):
-        text = f"Scanning… {stats.found:,} files"
+        known = len(self.model.recs)
+        text = f"Scanning… {stats.found:,} of about {known:,} files" if known > stats.found else \
+            f"Scanning… {stats.found:,} files"
         details = [f"{stats.indexed:,} from the library index"] if stats.indexed else []
         if stats.parsed:
             details.append(f"{stats.parsed:,} read")
@@ -486,6 +491,12 @@ class MainWindow(QMainWindow):
             return
         if thread is not None and thread._cancel:
             self.scan_label.setText(f"Scan stopped after {stats.found:,} files")
+        elif stats.unlisted:
+            # Some folders could not be read: keep showing their files rather
+            # than treating them as gone.
+            self.scan_label.setText(f"Scanned {stats.found:,} files; {len(stats.unlisted):,} folder(s) could "
+                                    "not be read (is the share still connected?)")
+            self.scan_label.setToolTip("\n".join(stats.unlisted[:20]))
         else:
             gone = [r.path for r in self.model.recs if r.path not in self._scan_seen]
             if gone:
@@ -507,6 +518,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Could not update the library index: {stats.index_error}", 10000)
         self._rebuild_tree()
         self._update_status()
+        self.offload.library_ready()
         if getattr(self, "_show_after_scan", None):
             folder, self._show_after_scan = self._show_after_scan, None
             self._show_folder(folder)

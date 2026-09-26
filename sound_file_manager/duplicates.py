@@ -171,11 +171,16 @@ def channels_contained(small: str, big: str, *, cancelled: Callable[[], bool] = 
     return True
 
 
+# Fingerprints read at once. Over Wi-Fi to the NAS: 86 ms per file one at a
+# time, 57 ms with 4, no better with 16 or 32 (the share serves a few opens at
+# once). Wired on Linux it measured about the same either way.
+FINGERPRINT_WORKERS = 4
+
+
 class Fingerprints:
     """sample_hash() with a cache (anything with get_hash/put_hash)."""
 
-    def __init__(self, cache=None, workers: int = 1):
-        # One reader: parallel reads measured no faster on the NAS.
+    def __init__(self, cache=None, workers: int = FINGERPRINT_WORKERS):
         self.cache = cache
         self.workers = workers
         self.memo: dict[str, str] = {}
@@ -447,6 +452,19 @@ def _digits(name: str) -> list[str]:
     return re.findall(r"\d+", name)
 
 
+def similar_names(a: str, b: str) -> bool:
+    """A typo (SUNRISE / SUNRYSE) or an added word (ORCHARD / ORCHARD INC).
+    Names that differ in their numbers are different days or parts
+    (CHAPTER 2 / CHAPTER 4), not the same project."""
+    na, nb = normalize(a), normalize(b)
+    if _digits(a) != _digits(b) or min(len(na), len(nb)) < 3:
+        return False
+    short, long_ = sorted((na, nb), key=len)
+    prefix = long_.startswith(short) and not re.search(r"\d", long_[len(short):])
+    ratio = difflib.SequenceMatcher(None, na, nb).ratio() if min(len(na), len(nb)) >= 5 else 0
+    return prefix or ratio >= 0.85
+
+
 def _relative_parts(path: str, root: str) -> list[str] | None:
     """Path parts below root (plain string work: this runs for every file)."""
     prefix = root.rstrip("/") + "/"
@@ -567,15 +585,8 @@ def find_duplicate_projects(recs: list[Recording], root: str, containers: Iterab
         return n
 
     for i, a in enumerate(free):
-        na = normalize(a)
         for b in free[i + 1:]:
-            nb = normalize(b)
-            if _digits(a) != _digits(b):
-                continue
-            short, long_ = sorted((na, nb), key=len)
-            prefix = len(short) >= 3 and long_.startswith(short) and not re.search(r"\d", long_[len(short):])
-            ratio = difflib.SequenceMatcher(None, na, nb).ratio() if min(len(na), len(nb)) >= 5 else 0
-            if prefix or ratio >= 0.85:
+            if similar_names(a, b):
                 parent[find(b)] = find(a)
     clusters: dict[str, list[str]] = defaultdict(list)
     for n in free:
@@ -596,6 +607,168 @@ def find_duplicate_projects(recs: list[Recording], root: str, containers: Iterab
             continue
         groups.append(ProjectGroup("folders", [os.path.basename(folders[0])], folders, index.files(folders)))
     return groups
+
+
+# ---------------------------------------------------------------- nested folders
+
+@dataclass
+class NestedFolder:
+    """A folder inside a folder with the same name, e.g. Project/250101/250101:
+    usually a day folder copied into itself. Merging moves the inner files up."""
+    outer: str
+    inner: str
+    outer_files: list[Recording]  # below outer, but not below inner
+    inner_files: list[Recording]
+
+    def destination(self, rec: Recording) -> str:
+        """Where an inner file goes: the same place, one level up."""
+        return self.outer + rec.path[len(self.inner):]
+
+    def counts(self) -> tuple[int, int, int]:
+        """(already in the outer folder, new, a different file in the way)."""
+        by_path = {r.path: r for r in self.outer_files}
+        same = new = clash = 0
+        for rec in self.inner_files:
+            other = by_path.get(self.destination(rec))
+            if other is None:
+                new += 1
+            elif audio_key(other) is not None and audio_key(other) == audio_key(rec):
+                same += 1
+            else:
+                clash += 1
+        return same, new, clash
+
+
+def find_nested_folders(recs: list[Recording], root: str) -> list[NestedFolder]:
+    """Folders whose parent has the same name (ignoring case, spaces and
+    punctuation), below a folder of the library. When they are nested more
+    than twice (A/A/A), only the deepest pair is listed: merge it first."""
+    usable = [r for r in recs if not r.error and not _in_leftovers(r.path, root)]
+    index = _FolderIndex(usable)
+    prefix = root.rstrip("/") + "/"
+    pairs = {}
+    for folder in index.below:
+        if not folder.startswith(prefix):
+            continue
+        parent = os.path.dirname(folder)
+        if not parent.startswith(prefix):
+            continue  # the parent is the library itself
+        name = normalize(os.path.basename(folder))
+        if name and name == normalize(os.path.basename(parent)):
+            pairs[folder] = parent
+    result = []
+    for inner, outer in sorted(pairs.items(), key=lambda kv: kv[0].casefold()):
+        if any(o == inner for o in pairs.values()):
+            continue  # a deeper pair inside this one goes first
+        inner_prefix = inner + "/"
+        outer_files = [r for r in index.files([outer]) if not r.path.startswith(inner_prefix)]
+        result.append(NestedFolder(outer, inner, outer_files, index.files([inner])))
+    return result
+
+
+def plan_nested_merge(nested: NestedFolder, recs: list[Recording]) -> list[Action]:
+    """Move the inner folder's files up into the outer one: a file already
+    there (the same recording at the same place) is removed after a byte check,
+    a copy with notes the outer one lacks takes its place, a different file in
+    the way stays where it is. Nothing is overwritten."""
+    by_path = {r.path: r for r in recs}
+    taken = set(by_path)
+    actions = []
+    for rec in sorted(nested.inner_files, key=lambda r: r.path):
+        dst = nested.destination(rec)
+        other = by_path.get(dst)
+        if other is None:
+            if dst in taken:
+                actions.append(Action("skip", rec, dst, "another file is already going there"))
+                continue
+            taken.add(dst)
+            actions.append(Action("move", rec, dst, "one level up, out of the nested folder"))
+            continue
+        if audio_key(other) is None or audio_key(other) != audio_key(rec):
+            actions.append(Action("skip", rec, dst, "a different file with this name is already there"))
+            continue
+        differs = metadata_differences([other, rec])
+        if adds_notes(rec, other):
+            actions.append(Action("replace", rec, dst, "has notes the outer copy lacks: it takes its place",
+                                  "audio", other=other))
+        elif differs and not is_take_file(rec.name):
+            actions.append(Action("differs", rec, dst, f"the same recording is in the outer folder, but its "
+                                  f"{', '.join(differs)} differs"))
+        else:
+            level = "identical" if other.size == rec.size and not differs else "audio"
+            actions.append(Action("remove", rec, dst, "the same file is already in the outer folder", level))
+    return keep_takes_together(actions)
+
+
+# ---------------------------------------------------------------- card offload
+
+def recording_key(rec: Recording) -> tuple | None:
+    """"The same recording" without reading the file: the same name and the
+    same audio key (as in Fingerprints, where such copies are not read)."""
+    key = audio_key(rec)
+    return None if key is None else (rec.name.casefold(), key)
+
+
+@dataclass
+class CardProjectMatch:
+    """A project folder on a card that the library already has (by name)."""
+    card_folder: str
+    library_project: str
+    library_folder: str  # where most of its files are
+    kind: str  # "same" (same name), "spelling" or "similar"
+    library_files: int  # files of the project in that folder
+    card_recordings: int  # readable recordings in the card folder
+    in_library: int  # of those, already somewhere in the library
+
+    @property
+    def new_recordings(self) -> int:
+        return self.card_recordings - self.in_library
+
+
+def card_project_matches(card_recs: list[Recording], card_folder_of: Callable[[Recording], str],
+                         library_recs: list[Recording], root: str,
+                         containers: Iterable[str]) -> dict[str, list[CardProjectMatch]]:
+    """Card folder -> the library projects it may be (best first). A card
+    folder is compared by its own name and by the project names in its
+    files' metadata, like Find Duplicates compares projects."""
+    containers = list(containers)
+    locations = project_locations(library_recs, root, containers)
+    in_library = {k for k in map(recording_key, library_recs) if k is not None}
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for rec in library_recs:
+        for folder in locations.get(rec.project, ()):
+            if rec.path.startswith(folder.rstrip("/") + "/"):
+                counts[(rec.project, folder)] += 1
+    by_folder: dict[str, list[Recording]] = defaultdict(list)
+    for rec in card_recs:
+        by_folder[card_folder_of(rec)].append(rec)
+    result: dict[str, list[CardProjectMatch]] = {}
+    for folder, recs in by_folder.items():
+        readable = [r for r in recs if recording_key(r) is not None]
+        names = {folder} | {r.meta_project for r in readable if r.meta_project}
+        found: dict[str, str] = {}
+        for project in locations:
+            kinds = ["same" if project == name else "spelling" if normalize(project) == normalize(name)
+                     else "similar" if similar_names(project, name) else "" for name in names]
+            kind = next((k for k in ("same", "spelling", "similar") if k in kinds), "")
+            if kind:
+                found[project] = kind
+        matches = []
+        for project, kind in found.items():
+            best = max(locations[project], key=lambda f: counts[(project, f)])
+            matches.append(CardProjectMatch(folder, project, best, kind, counts[(project, best)], len(readable),
+                                            sum(1 for r in readable if recording_key(r) in in_library)))
+        order = {"same": 0, "spelling": 1, "similar": 2}
+        matches.sort(key=lambda m: (order[m.kind], -m.library_files, m.library_project.casefold()))
+        if matches:
+            result[folder] = matches
+    return result
+
+
+def recordings_in_library(card_recs: Iterable[Recording], library_recs: Iterable[Recording]) -> set[str]:
+    """Paths of the card recordings that are already somewhere in the library."""
+    known = {k for k in map(recording_key, library_recs) if k is not None}
+    return {r.path for r in card_recs if recording_key(r) in known}
 
 
 # ---------------------------------------------------------------- merge plan
@@ -649,6 +822,16 @@ def plan_project_merge(recs: list[Recording], group: ProjectGroup, target_folder
     renamed = bool(target_name) and group.retag
     others = [r for r in group.files if not r.path.startswith(target_prefix)]
     order = (lambda r: keeper_score(r, root, containers)) if root else (lambda r: r.path)
+    if move_files and hasattr(fingerprint, "prefetch"):
+        # Read the fingerprints the loop below will ask for, several at a time:
+        # copies of a kept recording under another name (and those kept files).
+        wanted = {}
+        for rec in others:
+            for other in kept.get(audio_key(rec), []):
+                if other.name.casefold() != rec.name.casefold():
+                    wanted[rec.path], wanted[other.path] = rec, other
+        if wanted:
+            fingerprint.prefetch(list(wanted.values()))
     actions = []
     for rec in sorted(in_target, key=lambda r: r.path):
         if renamed and rec.project != target_name:

@@ -16,10 +16,11 @@ class ScanThread(QThread):
     progress = Signal(object, str)  # ScanStats, current path
     finished_scan = Signal(object, str)  # ScanStats or None, error
 
-    def __init__(self, root: str, cache_file: str, parent=None, *, write_index: bool = False):
+    def __init__(self, root: str, cache_file: str, parent=None, *, read_index: bool = True,
+                 write_index: bool = False):
         super().__init__(parent)
         self.root, self.cache_file = root, cache_file
-        self.write_index = write_index
+        self.read_index, self.write_index = read_index, write_index
         self._cancel = False
 
     def cancel(self):
@@ -29,13 +30,13 @@ class ScanThread(QThread):
         cache = None
         try:
             cache = catalog.Cache(self.cache_file)
-            # An index in the library is always read (that changes nothing);
-            # it is only written when the setting allows it.
-            index = library_index.LibraryIndex.load(self.root)
+            # Loaded to use it, or to write only what changed.
+            index = (library_index.LibraryIndex.load(self.root) if self.read_index or self.write_index
+                     else None)
             stats = catalog.scan(self.root, cache, on_batch=self.batch.emit,
                                  on_progress=lambda s, p: self.progress.emit(s, p),
-                                 cancelled=lambda: self._cancel, index=index)
-            if self.write_index and not self._cancel and index.changed:
+                                 cancelled=lambda: self._cancel, index=index, read_index=self.read_index)
+            if self.write_index and index is not None and not self._cancel and index.changed:
                 try:
                     index.save()
                     stats.index_saved = True

@@ -15,12 +15,12 @@ from pathlib import Path
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
-    QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QTableView, QToolButton, QTreeWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QTableView, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, offload, report, settings
+from . import bwf, catalog, duplicates, offload, report, settings
 from .catalog import Recording
 from .dialogs import RewriteDialog, show_report
 from .file_model import COL, COLUMNS, EFFECTIVE_ROLE, REC_ROLE, RecordingsModel, RecordingsProxy
@@ -89,6 +89,95 @@ class CopyThread(QThread):
         self.finished_copy.emit(self.result)
 
 
+MERGE, NEW_FOLDER, SKIP = "merge", "new", "skip"
+
+
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+class ExistingProjectsDialog(QDialog):
+    """The card has project folders the library already has under another
+    folder (the same name written differently, or a similar name): copy
+    into the existing folder, into a new folder, or not at all."""
+
+    def __init__(self, rows: list[tuple[str, list[duplicates.CardProjectMatch]]], destination: str,
+                 names: dict[str, str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Projects already in the library")
+        self.destination = destination
+        self.boxes: dict[str, QComboBox] = {}
+        intro = QLabel("These folders on the card look like projects that are already in the library, in "
+                       "another folder. Copying into the existing folder keeps each project in one place; "
+                       "nothing in it is replaced (a different file with the same name is skipped).")
+        intro.setWordWrap(True)
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        kinds = {"same": "same name", "spelling": "same name, written differently", "similar": "similar name"}
+        row = 0
+        for folder, matches in rows:
+            best = matches[0]
+            title = QLabel(f"<b>{folder}</b> on the card: {_count(best.card_recordings, 'recording')}")
+            details = []
+            for match in matches:
+                where = self.relative(match.library_folder)
+                details.append(f"Library project <b>{match.library_project}</b> ({kinds[match.kind]}) in "
+                               f"<b>{where}/</b>, {_count(match.library_files, 'file')}")
+            everything = "It is" if best.card_recordings == 1 else f"All {best.card_recordings} are"
+            if best.in_library == best.card_recordings:
+                count = (f"<span style='color:#d13438'>{everything} already in the library</span>; copying "
+                         "again would make duplicates.")
+            elif best.in_library:
+                count = (f"{best.in_library} of them {'is' if best.in_library == 1 else 'are'} already in the "
+                         f"library; <b>{best.new_recordings} {'is' if best.new_recordings == 1 else 'are'} new</b>.")
+            else:
+                count = f"<b>{everything} new</b> to the library."
+            info = QLabel("<br>".join(details + [count]))
+            info.setWordWrap(True)
+            box = QComboBox()
+            for match in matches:
+                box.addItem(f"Copy into {self.relative(match.library_folder)}/ (merge)",
+                            (MERGE, self.relative(match.library_folder)))
+            box.addItem(f"Copy into a new folder: {names.get(folder, folder) or '(the destination itself)'}",
+                        (NEW_FOLDER, ""))
+            box.addItem("Don't copy this folder", (SKIP, ""))
+            box.setCurrentIndex(0 if best.new_recordings else box.count() - 1)
+            self.boxes[folder] = box
+            grid.addWidget(title, row, 0, 1, 2)
+            grid.addWidget(info, row + 1, 0, 1, 2)
+            grid.addWidget(QLabel("Action:"), row + 2, 0)
+            grid.addWidget(box, row + 2, 1)
+            if row:
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.HLine)
+                grid.addWidget(line, row - 1, 0, 1, 2)
+            row += 4
+        grid.setRowStretch(row, 1)  # keep the rows together at the top
+        body = QWidget()
+        body.setLayout(grid)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(body)
+        buttons = QDialogButtonBox()
+        buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("Keep Card Folder Names", QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+        self.resize(640, min(160 + 150 * len(rows), 700))
+
+    def relative(self, folder: str) -> str:
+        return os.path.relpath(folder, self.destination)
+
+    def choices(self) -> dict[str, tuple[str, str]]:
+        """Card folder -> (action, library folder below the destination for a merge)."""
+        return {folder: box.currentData() for folder, box in self.boxes.items()}
+
+
 class OffloadPage(QWidget):
     recordingSelected = Signal(object)  # Recording or None
     copiedToLibrary = Signal(list)  # destination folders, so the library rescans
@@ -96,10 +185,14 @@ class OffloadPage(QWidget):
     releaseCard = Signal()  # before ejecting: stop playing card files
     log = Signal(str, dict)
 
-    def __init__(self, qsettings, library_getter, parent=None):
+    def __init__(self, qsettings, library_getter, parent=None, library_recs=lambda: []):
         super().__init__(parent)
         self.qsettings = qsettings
         self.library = library_getter
+        self.library_recs = library_recs  # the Library's recordings, to find projects it already has
+        self.in_library_paths: set[str] = set()  # card recordings already somewhere in the library
+        self.skip_folders: set[str] = set()  # card folders not to tick ("Don't copy")
+        self._checked_card: str | None = None  # the card the library check ran for
         self.card: offload.Card | None = None
         self.files: list[str] = []
         self.plan: list[offload.CopyItem] = []
@@ -152,6 +245,8 @@ class OffloadPage(QWidget):
         self.tree.itemChanged.connect(self._tree_item_changed)
         self.tree.currentItemChanged.connect(lambda *_: self._apply_scope())
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
 
         self.model = RecordingsModel(self, editable=True)
         self.model.pendingChanged.connect(self._pending_changed)
@@ -397,6 +492,8 @@ class OffloadPage(QWidget):
         self.card = card
         self.done_names = {}
         self.files, self.plan = [], []
+        self.in_library_paths, self.skip_folders = set(), set()
+        self._checked_card = None
         self._plan_generation += 1  # results for the previous card are ignored
         self.last_folders = []
         self.report_infos = {}
@@ -441,7 +538,92 @@ class OffloadPage(QWidget):
         self.card_info.setText(f"{len(recs)} recordings, {offload.human_size(total)}"
                                + (f" · {', '.join(recorders)}" if recorders else ""))
         self._fill_tree(recs)
+        self.check_library_projects()
         self._replan()
+
+    def check_library_projects(self, only: str | None = None) -> None:
+        """Find card folders whose project the library already has in another
+        folder, and let the user choose: merge into it, a new folder, or skip.
+        `only` checks one card folder again (from the tree's menu)."""
+        recs = [r for r in self.model.recs if not r.error]
+        library, destination = self.library(), self.destination()
+        library_recs = self.library_recs()
+        if self.card is None or not library or not library_recs:
+            return
+        if only is None:
+            self._checked_card = self.card.path
+            self.in_library_paths = duplicates.recordings_in_library(recs, library_recs)
+        if not destination or not self.in_library(destination):
+            return  # NAS folder names are relative to a destination outside the library
+        card_root = self.card.path
+        matches = duplicates.card_project_matches(
+            recs, lambda r: offload.project_folder(r.path, card_root), library_recs, library,
+            settings.get(self.qsettings, "container_folders"))
+        names = self.folder_names()
+        below = os.path.normpath(destination) + "/"
+        rows = []
+        for folder, candidates in sorted(matches.items(), key=lambda kv: kv[0].casefold()):
+            if folder in (offload.ROOT_FILES, offload.FALSE_TAKES) or (only is not None and folder != only):
+                continue
+            usable = [m for m in candidates if (os.path.normpath(m.library_folder) + "/").startswith(below)]
+            target = os.path.normpath(os.path.join(destination, names.get(folder, folder)))
+            if not usable or (only is None and any(os.path.normpath(m.library_folder) == target for m in usable)):
+                continue  # the copy already goes into the project's folder
+            rows.append((folder, usable))
+        if not rows:
+            if only is not None:
+                QMessageBox.information(self, "Offload", f"The library has no other folder for '{only}'.")
+            return
+        dialog = ExistingProjectsDialog(rows, destination, names, self)
+        if dialog.exec():
+            for folder, (action, relative) in dialog.choices().items():
+                self.skip_folders.discard(folder)
+                if action == SKIP:
+                    self.skip_folders.add(folder)
+                    self._tick_folder(folder, False)
+                elif action == MERGE:
+                    self._set_nas_folder(folder, relative)
+        dialog.deleteLater()
+
+    def library_ready(self) -> None:
+        """The Library has loaded or finished a scan: check a card that was read
+        before the library was there, and set its default ticks again."""
+        if self.card is None or self._reader is not None or self._copy is not None or not self.model.recs:
+            return
+        if self._checked_card == self.card.path or not self.library_recs():
+            return
+        self.check_library_projects()
+        self.plan = []  # the next plan sets the default ticks again
+        self._plan_timer.start()
+
+    def _tree_folder_item(self, folder: str) -> QTreeWidgetItem | None:
+        for i in range(1, self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item.data(0, FOLDER_ROLE) == folder:
+                return item
+        return None
+
+    def _set_nas_folder(self, folder: str, name: str) -> None:
+        item = self._tree_folder_item(folder)
+        if item is not None and item.text(3) != name:
+            item.setText(3, name)  # remembered and replanned by _tree_item_changed
+
+    def _tick_folder(self, folder: str, on: bool) -> None:
+        item = self._tree_folder_item(folder)
+        if item is None:
+            return
+        for j in range(item.childCount()):
+            item.child(j).setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+    def _tree_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        folder = item.data(0, FOLDER_ROLE) if item is not None else None
+        if not folder or folder in (offload.ROOT_FILES, offload.FALSE_TAKES):
+            return
+        menu = QMenu(self)
+        action = menu.addAction("Find This Project in the Library…")
+        action.triggered.connect(lambda: self.check_library_projects(only=folder))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------ tree
 
@@ -634,6 +816,8 @@ class OffloadPage(QWidget):
                 continue
             status[rec.path] = {"new": "new", "same": "on NAS", "conflict": "conflict: different file on NAS"}[
                 item.status]
+            if item.status == "new" and rec.path in self.in_library_paths:
+                status[rec.path] = "in library (elsewhere)"
         self.model.set_status(status)
         # Tree status per day, and default ticks on first read: days with
         # anything new are ticked, days already on the NAS are not.
@@ -648,8 +832,14 @@ class OffloadPage(QWidget):
                          and offload.day_folder(p.src, self.card.path) == day]
                 new = sum(1 for p in items if p.status == "new")
                 conflicts = sum(1 for p in items if p.status == "conflict")
+                # Recordings the library already has in another folder: copying them
+                # again would make duplicates, so such days are not ticked.
+                new_audio = [p for p in items if p.status == "new" and catalog.is_audio_file(os.path.basename(p.src))]
+                elsewhere = bool(new_audio) and all(p.src in self.in_library_paths for p in new_audio)
                 if conflicts:
                     text = f"{conflicts} conflict(s)"
+                elif elsewhere:
+                    text = "in library (elsewhere)"
                 elif new == len(items):
                     text = "new"
                 elif new:
@@ -657,8 +847,11 @@ class OffloadPage(QWidget):
                 else:
                     text = "on NAS"
                 child.setText(2, text)
+                child.setToolTip(2, "These recordings are already in the library, in another folder"
+                                 if elsewhere else "")
                 if first_plan:
-                    wanted = new > 0 and folder != offload.FALSE_TAKES
+                    wanted = (new > 0 and folder != offload.FALSE_TAKES and folder not in self.skip_folders
+                              and not elsewhere)
                     child.setCheckState(0, Qt.CheckState.Checked if wanted else Qt.CheckState.Unchecked)
             nas = item.text(3).strip()
             target = os.path.join(self.destination(), nas) if nas else self.destination()

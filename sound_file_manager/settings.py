@@ -28,10 +28,13 @@ DEFAULTS: dict[str, object] = {
     "mixer_folder": "",               # where mixer settings / automation are saved
     "mixer_collapsed": False,
     "library_counts": "projects",     # sidebar numbers: "projects", "files" or "both"
-    # Keep an index in the library (<library>/.sfm-index) so other computers
-    # don't read every file again; optionally with the waveforms (large).
-    "library_index": False,
-    "library_index_waveforms": False,
+    # An index in the library (<library>/.sfm-index) so other computers don't
+    # read every file again: use it (read) and update it (write), for file
+    # metadata and for waveforms (large) separately.
+    "library_index_read": True,
+    "library_index": False,              # update the file metadata
+    "library_index_waveforms_read": True,
+    "library_index_waveforms": False,    # update the waveforms
     "library_grouping": "date",       # Library sidebar: "date" (year > month > project) or "name"
     # Offload
     "verify_copies": True,           # read each copy back and compare with the card

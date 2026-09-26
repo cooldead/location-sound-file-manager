@@ -7,12 +7,13 @@ import gzip
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -447,14 +448,21 @@ class SettingsDialog(QDialog):
         self.family.setChecked(settings.get(qsettings, "apply_to_take_family"))
         self.confirm_undo = QCheckBox("Ask before undoing")
         self.confirm_undo.setChecked(settings.get(qsettings, "confirm_undo"))
-        self.index = QCheckBox("Keep an index in the library folder")
-        self.index.setChecked(settings.get(qsettings, "library_index"))
-        self.index.setToolTip(f"Writes {library_index.INDEX_FOLDER}/ in the library folder after each scan")
-        self.index_waves = QCheckBox("Also keep waveforms in the index")
-        self.index_waves.setChecked(settings.get(qsettings, "library_index_waveforms"))
+        # The library index: reading and writing, for file metadata and waveforms.
+        def box(key, tip):
+            check = QCheckBox()
+            check.setChecked(settings.get(qsettings, key))
+            check.setToolTip(tip)
+            return check
+        self.index_read = box("library_index_read", "Take file metadata from the library's index when a file is not "
+                              "in this computer's cache, instead of opening the file")
+        self.index = box("library_index", f"Write what the scan read into {library_index.INDEX_FOLDER}/ in the "
+                         "library after each complete scan")
+        self.index_waves_read = box("library_index_waveforms_read", "Draw a waveform from the library's index "
+                                    "instead of reading the whole WAV")
+        self.index_waves = box("library_index_waveforms", "Save each waveform into the library's index when it is "
+                               "first drawn (uses space on the share)")
         self.index_waves.toggled.connect(self._waves_toggled)
-        self.index.toggled.connect(self.index_waves.setEnabled)
-        self.index_waves.setEnabled(self.index.isChecked())
         self._estimates = None
         clear = QPushButton("Clear scan cache…")
         clear.setToolTip("Forget all cached metadata and waveforms; the next scan reads every file again")
@@ -476,28 +484,36 @@ class SettingsDialog(QDialog):
         form.addRow("", self.family)
         form.addRow("", self.confirm_undo)
         form.addRow("", clear)
-        form.addRow("Library index:", self.index)
         meta, waves = self._estimate()
         count = len(self.recordings)
+        index_box = QGroupBox(f"Library index (shared with other computers, in {library_index.INDEX_FOLDER}/ "
+                              "in the library folder)")
+        grid = QGridLayout(index_box)
+        self.index_status = QLabel(self._index_status())
+        self.index_status.setWordWrap(True)
+        grid.addWidget(self.index_status, 0, 0, 1, 3)
+        grid.addWidget(QLabel("<b>Use</b>"), 1, 1, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(QLabel("<b>Update</b>"), 1, 2, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(QLabel("File metadata"), 2, 0)
+        grid.addWidget(self.index_read, 2, 1, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(self.index, 2, 2, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(QLabel("Waveforms"), 3, 0)
+        grid.addWidget(self.index_waves_read, 3, 1, Qt.AlignmentFlag.AlignHCenter)
+        grid.addWidget(self.index_waves, 3, 2, Qt.AlignmentFlag.AlignHCenter)
+        grid.setColumnStretch(0, 1)
         index_hint = QLabel(
-            f"Stores what the scan read from every file (about {human_bytes(meta)} for {count:,} recordings) in "
-            f"a hidden {library_index.INDEX_FOLDER} folder in the library, so another computer's first scan "
-            "doesn't open every file again. An index that is already there is always used; an entry is only "
-            "trusted while the file's size and date are unchanged.")
+            "<b>Use</b>: a file or waveform this computer hasn't cached yet is taken from the index instead of "
+            "being read from the share (only while the file's size and date are unchanged). Changes nothing.<br>"
+            f"<b>Update</b> writes to the library: file metadata after each complete scan (about "
+            f"{human_bytes(meta)} for {count:,} recordings); waveforms as each file is first drawn "
+            f"(⚠ about {human_bytes(waves)} on the share, 8 KB per track per file).")
         index_hint.setWordWrap(True)
         index_hint.setEnabled(False)
-        form.addRow("", index_hint)
-        form.addRow("", self.index_waves)
-        waves_hint = QLabel(
-            f"⚠ Takes about {human_bytes(waves)} on the share for {count:,} recordings (8 KB per track per "
-            "file), filled in as files are first shown. Saves reading each WAV again to draw it on another "
-            "computer.")
-        waves_hint.setWordWrap(True)
-        waves_hint.setEnabled(False)
-        form.addRow("", waves_hint)
+        grid.addWidget(index_hint, 4, 0, 1, 3)
         box, _ = _buttons(self, "Save")
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(index_box)
         layout.addWidget(box)
         self.resize(640, self.sizeHint().height())
 
@@ -510,6 +526,18 @@ class SettingsDialog(QDialog):
         if self._estimates is None:
             self._estimates = index_estimates(self.recordings, self.folder.text().strip())
         return self._estimates
+
+    def _index_status(self) -> str:
+        """What the library folder holds now (one or two requests to the share)."""
+        root = self.folder.text().strip()
+        path = os.path.join(library_index.index_folder(root), library_index.METADATA_FILE)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return "This library has no index yet."
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+        waves = "with waveforms" if library_index.has_waveforms(root) else "no waveforms"
+        return f"This library has an index: file metadata {human_bytes(stat.st_size)}, updated {when}; {waves}."
 
     def _waves_toggled(self, on: bool):
         if not on or settings.get(self.qsettings, "library_index_waveforms"):
@@ -541,8 +569,10 @@ class SettingsDialog(QDialog):
         settings.put(self.qsettings, "write_embedded_filename", self.embedded.isChecked())
         settings.put(self.qsettings, "apply_to_take_family", self.family.isChecked())
         settings.put(self.qsettings, "confirm_undo", self.confirm_undo.isChecked())
+        settings.put(self.qsettings, "library_index_read", self.index_read.isChecked())
         settings.put(self.qsettings, "library_index", self.index.isChecked())
-        settings.put(self.qsettings, "library_index_waveforms", self.index.isChecked() and self.index_waves.isChecked())
+        settings.put(self.qsettings, "library_index_waveforms_read", self.index_waves_read.isChecked())
+        settings.put(self.qsettings, "library_index_waveforms", self.index_waves.isChecked())
         super().accept()
 
 
