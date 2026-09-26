@@ -33,7 +33,10 @@ by the parser, library, decoder and player. Tests cover both headers and samples
 above 0 dBFS. Input samples retain their headroom through decoding and gain
 adjustment; only the final speaker output is limited to prevent clipping at the
 device. Lower the mixer gain to listen to over-range material. The waveform
-overview currently tops out at 0 dBFS; it does not display the excess headroom.
+overview tops out at 0 dBFS, with red marks at full-scale columns. It does not
+display the amount of excess headroom. These markers use the same rendering
+code on Linux and macOS. Invalid NaN/infinity samples in damaged float files
+are converted to finite values before mixing or drawing.
 
 Duplicate candidates now distinguish integer PCM from floating-point recordings,
 including comparisons of versions with different track counts.

@@ -7,9 +7,9 @@ A desktop app for Linux and macOS for browsing a library of production sound rec
 | Platform | Release | Download |
 |---|---|---|
 | **Linux** | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). |
-| **macOS** (Apple silicon) | [v1.2.1 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.2.1) | `Location-Sound-File-Manager-1.2.1-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
+| **macOS** (Apple silicon) | [v1.4.0 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-macos) | `Location-Sound-File-Manager-1.4.0-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
 
-The Mac app is built separately, so it can be a version behind: the Linux release and the source have the newest features. To get them on a Mac now, build the app from the source ([macOS](#macos)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
+The Linux and Mac releases are built separately from the shared source. Both platform downloads above include the v1.4.0 features. You can also build the Mac app from source ([macOS](#macos)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
 
 ## First run
 
