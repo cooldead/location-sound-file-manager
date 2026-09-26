@@ -18,7 +18,16 @@ DEFAULTS: dict[str, object] = {
     "organize_pattern": "{project}/{day}",
     "organize_remove_empty": True,
     "confirm_undo": True,
-    "volume": 100,
+    "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
+    "waveform_scale": "db",           # "db" or "linear"
+    "waveform_collapsed": False,
+    "mixer_master_db": 0.0,
+    "mixer_exclusive_solo": False,
+    "mixer_auto_trim": True,          # lower the mix by 1/sqrt(n) when n tracks play
+    "mixer_folder": "",               # where mixer settings / automation are saved
+    "mixer_collapsed": False,
+    "library_counts": "projects",     # sidebar numbers: "projects", "files" or "both"
+    "library_grouping": "date",       # Library sidebar: "date" (year > month > project) or "name"
     # Offload
     "verify_copies": True,           # read each copy back and compare with the card
     "include_false_takes": False,    # also copy the recorder's FALSETAKES folder
@@ -112,3 +121,9 @@ def history_path() -> Path:
     """~/.local/share/location-sound-file-manager/history.jsonl: every change the app made to files."""
     base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
     return Path(base) / APP_DIR / "history.jsonl"
+
+
+def markers_path() -> Path:
+    """~/.local/share/location-sound-file-manager/markers.sqlite: waveform markers per file."""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+    return Path(base) / APP_DIR / "markers.sqlite"

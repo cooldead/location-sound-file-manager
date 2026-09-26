@@ -58,7 +58,7 @@ def audio(frames=4800, channels=2, bits=24, level=0x100000) -> bytes:
 
 def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO.wav",
              layout="sd", ixml_padding=400, frames=4800, time_reference=48000 * 3600, extra_tail=b"",
-             rf64=False, with_ixml=True, with_bext=True) -> bytes:
+             rf64=False, with_ixml=True, with_bext=True, level=0x100000, levels=None) -> bytes:
     """Write a WAV and return its audio data bytes.
 
     layout "sd": JUNK bext iXML fmt data (Sound Devices); "zoom": bext iXML fmt PAD data.
@@ -71,7 +71,15 @@ def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO
                               if line and not line.startswith("sFILENAME"))
     ixml = SD_IXML.format(project=project, scene=scene, take=take, filename=filename).encode()
     ixml += b" " * ixml_padding
-    data = audio(frames)
+    # levels: one constant level per channel (lets tests build files whose
+    # channels are, or are not, contained in another file).
+    if levels:
+        width = 3
+        frame = b"".join(int(lv).to_bytes(4, "little", signed=True)[:width] for lv in levels)
+        data = frame * frames
+    else:
+        data = audio(frames, level=level)
+    channels = len(levels) if levels else 2
     chunks = []
     if rf64:
         chunks.append(chunk(b"ds64", struct.pack("<QQQI", 0, len(data), frames, 0)))
@@ -81,7 +89,7 @@ def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO
         chunks.append(bext_chunk(description, time_reference))
     if with_ixml:
         chunks.append(chunk(b"iXML", ixml))
-    chunks.append(fmt_chunk())
+    chunks.append(fmt_chunk(channels=channels))
     if layout == "zoom":
         chunks.append(chunk(b"PAD ", b"\0" * 200))
     if rf64:

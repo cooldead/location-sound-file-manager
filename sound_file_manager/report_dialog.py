@@ -253,7 +253,7 @@ class ReportDialog(QDialog):
             self._update_preview()
 
     def _build_columns(self, chosen: list[str]) -> QGroupBox:
-        box = QGroupBox("Table columns (tick to show, drag to reorder) and page")
+        box = QGroupBox("Table columns (check to show, drag to reorder) and page")
         self.columns = QListWidget()
         self.columns.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.columns.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -339,7 +339,7 @@ class ReportDialog(QDialog):
         _, points = report.column_layout(keys, headers, rows, info.orientation)
         if points < report.TABLE_POINTS:
             self.fit_label.setText(f"⚠ These columns don't fit on a {info.orientation} page at normal size; the table "
-                                   f"text is reduced to {points:g} pt. Untick a column or switch to "
+                                   f"text is reduced to {points:g} pt. Uncheck a column or switch to "
                                    f"{'Landscape' if info.orientation == 'portrait' else 'fewer columns'} for "
                                    "larger text.")
             self.fit_label.show()
@@ -362,7 +362,7 @@ class ReportDialog(QDialog):
         info = self.info()
         pdf, csv_ = self.formats()
         if not (pdf or csv_):
-            QMessageBox.information(self, "Sound Report", "Tick PDF and/or CSV.")
+            QMessageBox.information(self, "Sound Report", "Check PDF and/or CSV.")
             return False
         group = self.groups[self.index]
         folder = group.default_folder or os.path.expanduser("~")
@@ -391,7 +391,7 @@ class ReportDialog(QDialog):
     def save_all(self):
         pdf, csv_ = self.formats()
         if not (pdf or csv_):
-            QMessageBox.information(self, "Sound Report", "Tick PDF and/or CSV.")
+            QMessageBox.information(self, "Sound Report", "Check PDF and/or CSV.")
             return
         infos = self.infos()
         plan = []

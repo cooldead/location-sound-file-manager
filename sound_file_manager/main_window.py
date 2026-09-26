@@ -16,26 +16,29 @@ from PySide6.QtGui import (
     QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPixmap, QStandardItemModel,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu,
     QMessageBox, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTableView, QTextBrowser, QToolBar, QToolButton,
     QTreeView,
     QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, offload, settings
-from .organize import remove_left_empty
+from . import bwf, catalog, duplicates, offload, settings
+from .offload import human_size
+from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
 from .dialogs import (
     BatchRenameDialog, MetadataDialog, OrganizeDialog, RenameDialog, RewriteDialog, SettingsDialog, show_report,
 )
 from .file_model import (
-    COL, COLUMNS, DAY_ROLE, NO_PROJECT, PROJECT_ROLE, REC_ROLE, RecordingsModel, RecordingsProxy,
-    build_project_tree,
+    COL, COLUMNS, DAY_ROLE, NO_PROJECT, PERIOD_ROLE, PROJECT_ROLE, REC_ROLE, RecordingsModel, RecordingsProxy,
+    build_project_tree, in_period, period_label,
 )
 from .offload_page import OffloadPage
 from .player import SEEK_STEP, PlayerWidget
 from .report import ASSETS
 from .branding_dialog import BrandingDialog, SetupDialog
+from .duplicates_dialog import DuplicatesWindow
+from .removed_dialog import RemovedDialog
 from .report_dialog import ReportDialog, ReportGroup
 from .renamer import RenameError, RenameOp, apply_renames, remove_empty_dirs, undo_ops
 from .workers import ScanThread, run_job
@@ -53,6 +56,8 @@ class MainWindow(QMainWindow):
         self._scan_seen: set[str] = set()
         self._current_path: str | None = None
         self._report_windows: list = []
+        self._duplicates_window = None
+        self._removed_window = None
 
         if library:
             settings.put(self.qsettings, "library_folder", library)
@@ -80,6 +85,36 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self.tree.selectionModel().currentChanged.connect(self._scope_changed)
+        self._tree_built = False
+        self.grouping = QComboBox()
+        self.grouping.addItem("By year and month", "date")
+        self.grouping.addItem("By project name", "name")
+        self.grouping.setToolTip("How the sidebar lists projects: by year, then month, or A to Z by name")
+        self.grouping.setCurrentIndex(max(self.grouping.findData(settings.get(self.qsettings, "library_grouping")), 0))
+        self.grouping.currentIndexChanged.connect(self._grouping_changed)
+        tree_panel = QWidget()
+        tree_layout = QVBoxLayout(tree_panel)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        self.counts_button = QToolButton()
+        self.counts_button.setText("#")
+        self.counts_button.setToolTip("What the numbers in the sidebar count")
+        self.counts_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        counts_menu = QMenu(self.counts_button)
+        self._count_actions = {}
+        for key, label in (("projects", "Count Projects"), ("files", "Count Files"),
+                           ("both", "Count Projects and Files (projects / files)")):
+            action = counts_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(settings.get(self.qsettings, "library_counts") == key)
+            action.triggered.connect(lambda _on, k=key: self._counts_changed(k))
+            self._count_actions[key] = action
+        self.counts_button.setMenu(counts_menu)
+        grouping_row = QHBoxLayout()
+        grouping_row.setContentsMargins(0, 0, 0, 0)
+        grouping_row.addWidget(self.grouping, 1)
+        grouping_row.addWidget(self.counts_button)
+        tree_layout.addLayout(grouping_row)
+        tree_layout.addWidget(self.tree, 1)
 
         self.table = QTableView()
         self.table.setModel(self.proxy)
@@ -116,8 +151,9 @@ class MainWindow(QMainWindow):
         self._search_timer.timeout.connect(lambda: self._apply_filter(text=True))
         self.search.textChanged.connect(self._search_timer.start)
 
-        self.player = PlayerWidget(self.cache_file)
-        self.player.volume.setValue(settings.get(self.qsettings, "volume"))
+        self.player = PlayerWidget(self.cache_file, self.qsettings)
+        self.player.stepRequested.connect(self._step_file)
+        self.player.message.connect(lambda text: self.statusBar().showMessage(text, 8000))
 
         middle = QWidget()
         middle_layout = QVBoxLayout(middle)
@@ -126,7 +162,7 @@ class MainWindow(QMainWindow):
         middle_layout.addWidget(self.table, 1)
 
         self.h_split = QSplitter(Qt.Orientation.Horizontal)
-        self.h_split.addWidget(self.tree)
+        self.h_split.addWidget(tree_panel)
         self.h_split.addWidget(middle)
         self.h_split.addWidget(self.details)
         self.h_split.setStretchFactor(0, 0)
@@ -149,7 +185,7 @@ class MainWindow(QMainWindow):
         self.v_split.addWidget(self.stack)
         self.v_split.addWidget(self.player)
         self.v_split.setStretchFactor(0, 1)
-        self.v_split.setSizes([700, 170])
+        self.v_split.setSizes([520, 480])
         self.setCentralWidget(self.v_split)
 
         self.status_label = QLabel()
@@ -193,6 +229,9 @@ class MainWindow(QMainWindow):
                                          "Edit project, scene, take, tape, note and circled")
         self.act_organize = self._action("Reorganize into Folders…", self.organize_selected, "Ctrl+Shift+M",
                                          "folder-new", "Preview and move files into project folders")
+        self.act_duplicates = self._action("Find Duplicates…", self.find_duplicates, "Ctrl+D", "edit-find",
+                                           "Find duplicate recordings and duplicate projects, and merge or "
+                                           "remove them")
         self.act_undo = self._action("Undo", self.undo, "Ctrl+Z", "edit-undo")
         self.act_undo.setEnabled(False)
         self.act_export = self._action("Export List as CSV…", self.export_csv, "Ctrl+Shift+E", "document-export",
@@ -208,6 +247,10 @@ class MainWindow(QMainWindow):
         self._action("Back", lambda: self.player.seek_relative(-SEEK_STEP), "Left", context=win)
         self._action("Forward", lambda: self.player.seek_relative(SEEK_STEP), "Right", context=win)
         self._action("Stop", self.player.stop, "Ctrl+.", context=win)
+        self._action("Loop", self.player.toggle_loop, "L", context=win)
+        self._action("Add Marker", self.player.add_marker, "M", context=win)
+        self._action("Previous Marker", lambda: self.player.jump_marker(-1), ",", context=win)
+        self._action("Next Marker", lambda: self.player.jump_marker(1), ".", context=win)
         self._action("Quit", self.close, "Ctrl+Q")
 
         self.act_report = self._action("Sound Report…", self.sound_report, "Ctrl+R", "document-print",
@@ -246,7 +289,8 @@ class MainWindow(QMainWindow):
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        for action in (self.act_rescan, None, self.act_rename, self.act_metadata, self.act_organize, None,
+        for action in (self.act_rescan, None, self.act_rename, self.act_metadata, self.act_organize,
+                       self.act_duplicates, None,
                        self.act_undo, None, self.act_report, self.act_open_project, None, self.act_circled,
                        self.act_export):
             if action is None:
@@ -281,6 +325,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(right)
         self._update_brand()
         self.library_actions = [self.act_folder, self.act_rescan, self.act_rename, self.act_metadata,
+                                self.act_duplicates,
                                 self.act_organize, self.act_undo, self.act_report, self.act_open_project,
                                 self.act_circled, self.act_export, self.act_open_folder, self.act_copy_path,
                                 self.act_search]
@@ -292,7 +337,7 @@ class MainWindow(QMainWindow):
         geometry = self.qsettings.value("window/geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
-        for key, widget in (("window/h_split", self.h_split), ("window/v_split", self.v_split)):
+        for key, widget in (("window/h_split", self.h_split), ("window/v_split2", self.v_split)):
             state = self.qsettings.value(key)
             if state is not None:
                 widget.restoreState(state)
@@ -309,11 +354,10 @@ class MainWindow(QMainWindow):
             self.scan_thread.wait(5000)
         self.qsettings.setValue("window/geometry", self.saveGeometry())
         self.qsettings.setValue("window/h_split", self.h_split.saveState())
-        self.qsettings.setValue("window/v_split", self.v_split.saveState())
+        self.qsettings.setValue("window/v_split2", self.v_split.saveState())
         self.qsettings.setValue("window/header", self.table.horizontalHeader().saveState())
         self.qsettings.setValue("window/offload_split", self.offload.split.saveState())
         self.qsettings.setValue("window/page", "library" if self.stack.currentIndex() == 1 else "offload")
-        settings.put(self.qsettings, "volume", self.player.volume.value())
         self.player.shutdown()
         super().closeEvent(event)
 
@@ -457,39 +501,69 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ tree / filter
 
+    @staticmethod
+    def _scope_of(index: QModelIndex) -> tuple:
+        """(project, day, period) of a sidebar node; all None for "All recordings"."""
+        if not index.isValid():
+            return (None, None, None)
+        return (index.data(PROJECT_ROLE), index.data(DAY_ROLE), index.data(PERIOD_ROLE))
+
+    @staticmethod
+    def _is_scope(scope: tuple) -> bool:
+        """A project, day, year or month (anything narrower than all recordings)."""
+        return scope[0] is not None or scope[2] is not None
+
+    def _tree_indexes(self, parent: QModelIndex = QModelIndex()):
+        for row in range(self.tree_model.rowCount(parent)):
+            index = self.tree_model.index(row, 0, parent)
+            yield index
+            yield from self._tree_indexes(index)
+
+    def _reveal(self, index: QModelIndex):
+        parent = index.parent()
+        while parent.isValid():
+            self.tree.setExpanded(parent, True)
+            parent = parent.parent()
+
+    def _counts_changed(self, key: str):
+        settings.put(self.qsettings, "library_counts", key)
+        for k, action in self._count_actions.items():
+            action.setChecked(k == key)
+        self._rebuild_tree()
+
+    def _grouping_changed(self, *_):
+        settings.put(self.qsettings, "library_grouping", self.grouping.currentData())
+        self._tree_built = False
+        self._rebuild_tree()
+
     def _rebuild_tree(self):
-        current = self.tree.currentIndex()
-        scope = (current.data(PROJECT_ROLE), current.data(DAY_ROLE)) if current.isValid() else (None, None)
-        expanded = set()
-        for row in range(self.tree_model.rowCount()):
-            index = self.tree_model.index(row, 0)
-            if self.tree.isExpanded(index):
-                expanded.add(index.data(PROJECT_ROLE))
+        scope = self._scope_of(self.tree.currentIndex())
+        expanded = {self._scope_of(i) for i in self._tree_indexes() if self.tree.isExpanded(i)}
         self.tree.selectionModel().blockSignals(True)
-        build_project_tree(self.tree_model, self.model.recs)
+        by_date = self.grouping.currentData() == "date"
+        build_project_tree(self.tree_model, self.model.recs, by_date=by_date,
+                           counts=settings.get(self.qsettings, "library_counts"))
         target = self.tree_model.index(0, 0)
-        for row in range(self.tree_model.rowCount()):
-            index = self.tree_model.index(row, 0)
-            project = index.data(PROJECT_ROLE)
-            if project in expanded:
+        for index in self._tree_indexes():
+            key = self._scope_of(index)
+            if key in expanded:
                 self.tree.setExpanded(index, True)
-            if project == scope[0] and project is not None:
+            if key == scope and self._is_scope(scope):
                 target = index
-                if scope[1] is not None:
-                    for child_row in range(self.tree_model.rowCount(index)):
-                        child = self.tree_model.index(child_row, 0, index)
-                        if child.data(DAY_ROLE) == scope[1]:
-                            target = child
+        if not self._tree_built and by_date and self.model.recs and self.tree_model.rowCount() > 1:
+            self.tree.setExpanded(self.tree_model.index(1, 0), True)  # the newest year
+        self._tree_built = bool(self.model.recs)
+        self._reveal(target)
         self.tree.setCurrentIndex(target)
         self.tree.selectionModel().blockSignals(False)
-        project, day = target.data(PROJECT_ROLE), target.data(DAY_ROLE)
-        if (project, day) != (self.proxy.project, self.proxy.day):
-            self.proxy.set_scope(project, day)
+        scope = self._scope_of(target)
+        if scope != (self.proxy.project, self.proxy.day, self.proxy.period):
+            self.proxy.set_scope(*scope)
         self._update_status()
 
     def _scope_changed(self, current: QModelIndex, _previous=None):
         if current.isValid():
-            self.proxy.set_scope(current.data(PROJECT_ROLE), current.data(DAY_ROLE))
+            self.proxy.set_scope(*self._scope_of(current))
             self._update_status()
             self._update_actions()
 
@@ -541,6 +615,19 @@ class MainWindow(QMainWindow):
         self._update_actions()
         self._update_status()
 
+    def _step_file(self, step: int):
+        """The player's previous / next buttons: move the selection in the table
+        (or in the Offload review table)."""
+        table = self.table if self.stack.currentIndex() == 1 else getattr(self.offload, "table", None)
+        if table is None or table.model().rowCount() == 0:
+            return
+        current = table.currentIndex()
+        row = min(max((current.row() if current.isValid() else -1) + step, 0), table.model().rowCount() - 1)
+        index = table.model().index(row, 0)
+        table.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.ClearAndSelect |
+                                               QItemSelectionModel.SelectionFlag.Rows)
+        table.scrollTo(index)
+
     def _neighbours(self, rec: Recording, count: int = 3) -> list[Recording]:
         """The next rows in the table (then the previous one), for waveform prefetch."""
         row = self.model.row_of(rec.path)
@@ -579,12 +666,12 @@ class MainWindow(QMainWindow):
         self.act_organize.setEnabled(bool(recs))
         self.act_open_folder.setEnabled(len(recs) >= 1)
         self.act_copy_path.setEnabled(bool(recs))
-        for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search):
+        for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search,
+                       self.act_duplicates):
             action.setEnabled(True)
         self.act_rescan.setEnabled(self.scan_thread is None)
         self.act_undo.setEnabled(bool(self.undo_stack))
-        has_scope = bool(recs) or (self.tree.currentIndex().isValid()
-                                   and self.tree.currentIndex().data(PROJECT_ROLE) is not None)
+        has_scope = bool(recs) or self._is_scope(self._scope_of(self.tree.currentIndex()))
         self.act_report.setEnabled(has_scope)
         self.act_open_project.setEnabled(has_scope)
 
@@ -655,11 +742,20 @@ class MainWindow(QMainWindow):
 
     def _tree_menu(self, pos):
         index = self.tree.indexAt(pos)
-        if not index.isValid() or index.data(PROJECT_ROLE) is None:
+        scope = self._scope_of(index)
+        if not self._is_scope(scope):
             return
-        project, day = index.data(PROJECT_ROLE), index.data(DAY_ROLE)
-        recs = self._recs_in_scope(project, day)
+        project, day, period = scope
+        recs = self._recs_in_scope(*scope)
         menu = QMenu(self)
+        if project is None:  # a year, a month or "no date"
+            label = period_label(period) + (f" {period[:4]}" if len(period or "") == 7 else "")
+            projects = len({r.project or NO_PROJECT for r in recs})
+            report_action = menu.addAction(f"Sound Reports for the {projects:,} Project"
+                                           f"{'s' if projects != 1 else ''} in {label}…")
+            report_action.triggered.connect(lambda: self.sound_report(recs))
+            menu.exec(self.tree.viewport().mapToGlobal(pos))
+            return
         label = project if day is None else f"{project} / {day}"
         rename = menu.addAction(f"Set Project Name for These {len(recs):,} Files…")
         rename.triggered.connect(lambda: self.edit_metadata(recs, focus="project"))
@@ -667,7 +763,7 @@ class MainWindow(QMainWindow):
         organize_action.triggered.connect(lambda: self.organize_selected(recs))
         menu.addSeparator()
         chosen = {i.data(PROJECT_ROLE) for i in self.tree.selectionModel().selectedIndexes()
-                  if i.data(PROJECT_ROLE) is not None}
+                  if self._is_scope(self._scope_of(i))}
         if len(chosen) > 1 and project in chosen:
             report_action = menu.addAction(f"Sound Reports for {len(chosen)} Projects…")
             report_action.triggered.connect(lambda: self.sound_report())
@@ -690,9 +786,10 @@ class MainWindow(QMainWindow):
             action.toggled.connect(lambda on, c=col: header.setSectionHidden(c, not on))
         menu.exec(header.mapToGlobal(pos))
 
-    def _recs_in_scope(self, project, day) -> list[Recording]:
+    def _recs_in_scope(self, project, day, period=None) -> list[Recording]:
         return [r for r in self.model.recs
-                if (r.project or NO_PROJECT) == project and (day is None or (catalog.day_of(r) or "(No date)") == day)]
+                if (project is None or (r.project or NO_PROJECT) == project)
+                and (day is None or (catalog.day_of(r) or "(No date)") == day) and in_period(r, period)]
 
     def _family_of(self, recs: list[Recording]) -> list[Recording]:
         chosen = {r.path for r in recs}
@@ -770,12 +867,16 @@ class MainWindow(QMainWindow):
         if not inside:
             return
         project = max({r.project for r in inside}, key=lambda p: sum(1 for r in inside if r.project == p))
-        for row in range(self.tree_model.rowCount()):
-            index = self.tree_model.index(row, 0)
-            if index.data(PROJECT_ROLE) == (project or NO_PROJECT):
-                self.tree.setCurrentIndex(index)
-                self.tree.scrollTo(index)
-                break
+        newest = max((r.date for r in inside if r.project == project), default="")
+        matches = [i for i in self._tree_indexes()
+                   if i.data(PROJECT_ROLE) == (project or NO_PROJECT) and i.data(DAY_ROLE) is None]
+        # By date, a project is listed under each month it was recorded: show the latest.
+        best = next((i for i in matches if i.data(PERIOD_ROLE) and newest.startswith(i.data(PERIOD_ROLE))),
+                    matches[0] if matches else None)
+        if best is not None:
+            self._reveal(best)
+            self.tree.setCurrentIndex(best)
+            self.tree.scrollTo(best)
 
     # ------------------------------------------------------------ reports / project folders
 
@@ -784,20 +885,20 @@ class MainWindow(QMainWindow):
         recs = [r for r in self.selected_recordings() if not r.error]
         if len(recs) > 1:
             return recs
-        index = self.tree.currentIndex()
-        if index.isValid() and index.data(PROJECT_ROLE) is not None:
-            return [r for r in self._recs_in_scope(index.data(PROJECT_ROLE), index.data(DAY_ROLE)) if not r.error]
+        scope = self._scope_of(self.tree.currentIndex())
+        if self._is_scope(scope):
+            return [r for r in self._recs_in_scope(*scope) if not r.error]
         return recs
 
     def report_groups(self, recs: list[Recording] | None = None) -> list[ReportGroup]:
         """One report per project: from the sidebar selection (several projects
         or days), else the selected files, else the current project / day."""
         if recs is None:
-            scopes = [(i.data(PROJECT_ROLE), i.data(DAY_ROLE)) for i in self.tree.selectionModel().selectedIndexes()
-                      if i.data(PROJECT_ROLE) is not None]
+            scopes = [self._scope_of(i) for i in self.tree.selectionModel().selectedIndexes()
+                      if self._is_scope(self._scope_of(i))]
             selected = [r for r in self.selected_recordings() if not r.error]
-            if len(scopes) > 1:
-                recs = [r for project, day in scopes for r in self._recs_in_scope(project, day) if not r.error]
+            if len(scopes) > 1 or (scopes and scopes[0][0] is None and len(selected) <= 1):
+                recs = [r for scope in scopes for r in self._recs_in_scope(*scope) if not r.error]
             elif len(selected) > 1:
                 recs = selected
             else:
@@ -856,31 +957,7 @@ class MainWindow(QMainWindow):
         BrandingDialog(self.qsettings, self._scope_recordings()[:8] or None, self).exec()
 
     def project_folder_of(self, recs: list[Recording]) -> str:
-        """The folder that holds a project: the folder named like the project if
-        there is one, else the first folder below the library; the most common wins."""
-        containers = {c.casefold() for c in settings.get(self.qsettings, "container_folders")}
-        votes: dict[str, int] = {}
-        for rec in recs:
-            try:
-                parts = Path(rec.path).relative_to(self.root).parts[:-1]
-            except ValueError:
-                continue
-            chosen = None
-            for i, part in enumerate(parts):
-                if rec.project and part.casefold() == rec.project.casefold():
-                    chosen = parts[:i + 1]
-                    break
-            if chosen is None:
-                for i, part in enumerate(parts):
-                    if part.casefold() not in containers:
-                        chosen = parts[:i + 1]
-                        break
-            if chosen:
-                folder = os.path.join(self.root, *chosen)
-                votes[folder] = votes.get(folder, 0) + 1
-        if votes:
-            return max(votes, key=votes.get)
-        return offload.common_folder([r.path for r in recs])
+        return catalog.project_folder_of(recs, self.root, settings.get(self.qsettings, "container_folders"))
 
     def open_project_folder(self, recs=None):
         recs = recs if isinstance(recs, list) else self._scope_recordings()
@@ -968,10 +1045,17 @@ class MainWindow(QMainWindow):
             if box.checkBox().isChecked():
                 settings.put(self.qsettings, "confirm_undo", False)
         self.undo_stack.pop()
-        if entry["kind"] == "rename":
-            self._undo_renames(entry)
-        else:
-            self._undo_metadata(entry)
+        parts = entry["parts"] if entry["kind"] == "compound" else [entry]
+        # Parts are undone last-first (e.g. names written after a move, then the move).
+        for part in reversed(parts):
+            if part["kind"] == "rename":
+                self._undo_renames(part)
+            elif part["kind"] == "copies":
+                self._undo_copies(part)
+            else:
+                self._undo_metadata(part)
+        if entry["kind"] == "compound":
+            self.start_scan()  # files come back from the removed-duplicates folder
         self.act_undo.setEnabled(bool(self.undo_stack))
         self.act_undo.setText(f"Undo {self.undo_stack[-1]['label']}" if self.undo_stack else "Undo")
 
@@ -1066,6 +1150,8 @@ class MainWindow(QMainWindow):
             # Folders removed as "left empty" come back (apply_renames creates
             # missing folders), and so do the recorders' empty marker files.
             applied = apply_renames(reverse, None, progress=lambda d, t: job.report(d, t))
+            for folder in sorted(entry["removed_dirs"], key=lambda p: len(p.parts)):
+                folder.mkdir(parents=True, exist_ok=True)
             for marker in entry["removed_markers"]:
                 if not marker.name == ".DS_Store" and marker.parent.is_dir() and not marker.exists():
                     marker.touch()
@@ -1097,6 +1183,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Undid {entry['label']}", 6000)
 
     def _refresh_moved(self, mapping: dict[str, str], reread: bool):
+        self.player.markers.move(mapping)  # markers follow their files
         cache = catalog.Cache(self.cache_file)
         try:
             for old, new in mapping.items():
@@ -1118,6 +1205,562 @@ class MainWindow(QMainWindow):
             cache.close()
         self._tree_timer.start()
         self._selection_changed()
+
+    # ------------------------------------------------------------ duplicates
+
+    def find_duplicates(self):
+        if self._duplicates_window is None:
+            window = DuplicatesWindow(lambda: list(self.model.recs), lambda: self.root,
+                                      lambda: settings.get(self.qsettings, "container_folders"),
+                                      self.cache_file, self, runner=self)
+            window.cleanupRequested.connect(self.apply_cleanup)
+            window.reviewRequested.connect(self.review_removed)
+            window.compareRequested.connect(lambda: self.review_removed(compare=True))
+            window.emptyFoldersRequested.connect(lambda: self.delete_empty_folders(window))
+            window.playRequested.connect(lambda rec: (self.player.load(rec), self.player.toggle_play()))
+            self._duplicates_window = window
+        self._duplicates_window.show()
+        self._duplicates_window.raise_()
+        self._duplicates_window.activateWindow()
+
+    def make_cleanup_work(self, plan, known_paths: set[str] | None = None, known_recs: list | None = None):
+        """The file work of a cleanup, as fn(job) for a worker thread (job has
+        report(done, total, text) and cancelled). Nothing here touches the UI.
+
+        Every removal is checked byte for byte against the kept copy first.
+        A file that is not the same file is left where it is, or (review_mode
+        "copy" / "move") put next to the kept copy as <name>_ReviewForDeletion.
+        Removed files go to the removed-duplicates folder (undoable) unless
+        plan.permanent."""
+        root = self.root
+        reviewing = plan.review_mode in ("copy", "move")
+        if known_recs is None:
+            known_recs = list(self.model.recs)
+        if known_paths is None:
+            known_paths = {r.path for r in known_recs}
+        # _ISO/_LR takes: the files of each take per folder, to never split one.
+        partners: dict[tuple, set[str]] = {}
+        for r in known_recs:
+            if duplicates.is_take_file(r.name):
+                partners.setdefault((r.folder, duplicates.take_key(r)), set()).add(r.path)
+        leaving = {r.path for r, _, _ in plan.removals} | {r.path for r, _ in plan.moves} | \
+                  {rep[0].path for rep in plan.replacements}
+
+        def work(job):
+            out = {"verified": [], "skipped": [], "applied": [], "created": [], "deleted": [], "retagged": [],
+                   "need_rewrite": [], "copied": [], "reviewed": [], "removed_dirs": [], "removed_markers": [],
+                   "stopped": False, "replaced": []}
+            total = sum(r.size for r, _, _ in plan.removals) * 2
+            done = [0]
+
+            def advance(n):
+                done[0] += n
+                job.report(min(done[0], total), total)
+
+            # Nothing measurable yet (a merge may have no checks at all): a moving bar.
+            job.report(0, 0, "Getting ready…")
+
+            # _ISO/_LR files never get review copies (they are never renamed).
+            reviews = [(r, k) for r, k in plan.reviews if not duplicates.is_take_file(r.name)] if reviewing else []
+            for rec, keep, level in plan.removals:
+                if job.cancelled:
+                    out["skipped"].append(f"{rec.name}: not checked (stopped)")
+                    continue
+                take_file = duplicates.is_take_file(rec.name)
+                if take_file:
+                    staying = partners.get((rec.folder, duplicates.take_key(rec)), set()) - {rec.path} - leaving
+                    if staying:
+                        out["skipped"].append(f"{rec.name} ({rec.folder}): kept together with "
+                                              f"{', '.join(os.path.basename(p) for p in sorted(staying))}, which "
+                                              "stays in that folder")
+                        continue
+                job.report(done[0], total, f"Checking {rec.name} against the kept copy…")
+                different = False
+                try:
+                    if not os.path.exists(keep):
+                        ok, why = False, "the copy to keep is missing"
+                    elif level == "subset":
+                        # The kept file has more tracks: every channel of this one must be in it.
+                        ok = duplicates.channels_contained(rec.path, keep, cancelled=lambda: job.cancelled,
+                                                           progress=advance)
+                        why = "not all of its tracks are in the kept file"
+                    elif duplicates.files_identical(rec.path, keep, cancelled=lambda: job.cancelled,
+                                                    progress=lambda n: advance(n * 2)):
+                        ok, why = True, ""
+                    elif take_file:
+                        # The same _ISO/_LR file again: removed when its audio matches,
+                        # whatever its notes say; never a review copy.
+                        ok = duplicates.audio_identical(rec.path, keep, cancelled=lambda: job.cancelled)
+                        why = "its audio differs from the kept copy"
+                    elif reviewing:
+                        ok, different, why = False, True, "not byte for byte the same as the kept copy"
+                    elif level == "audio":
+                        ok = duplicates.audio_identical(rec.path, keep, cancelled=lambda: job.cancelled)
+                        why = "its audio differs from the kept copy"
+                    else:
+                        ok, why = False, "not byte for byte the same as the kept copy"
+                except InterruptedError:
+                    ok, why = False, "not checked (stopped)"
+                except (OSError, bwf.WavError) as error:
+                    ok, why = False, str(error)
+                if ok:
+                    out["verified"].append(rec)
+                elif different:
+                    reviews.append((rec, keep))
+                else:
+                    out["skipped"].append(f"{rec.name} ({rec.folder}): kept, {why}")
+            # Versions with notes replace the kept copy: only when the audio is the same.
+            replacing = []
+            for rec, old, *level in plan.replacements:
+                level = level[0] if level else "audio"
+                if job.cancelled:
+                    break
+                if duplicates.is_take_file(rec.name):
+                    staying = partners.get((rec.folder, duplicates.take_key(rec)), set()) - {rec.path} - leaving
+                    if staying:
+                        out["skipped"].append(f"{rec.name} ({rec.folder}): not used to replace the kept copy, "
+                                              "it stays with its _ISO/_LR partner")
+                        continue
+                job.report(0, 0, f"Checking {rec.name} against the copy it replaces…")
+                try:
+                    if level == "subset":
+                        # More tracks: every channel of the file it replaces must be in it.
+                        same = duplicates.channels_contained(old.path, rec.path, cancelled=lambda: job.cancelled)
+                    else:
+                        same = duplicates.audio_identical(rec.path, old.path, cancelled=lambda: job.cancelled)
+                except (OSError, bwf.WavError, InterruptedError) as error:
+                    same = False
+                    out["skipped"].append(f"{rec.name}: {error}")
+                    continue
+                if same:
+                    replacing.append((rec, old))
+                else:
+                    out["skipped"].append(f"{rec.name} ({rec.folder}): kept where it is, "
+                                          + ("the file it would replace has tracks that are not in it"
+                                             if level == "subset" else "its audio differs from the copy it would "
+                                             "replace"))
+            if job.cancelled:
+                out["stopped"] = True
+                return out
+            # Where review copies go: next to the kept copy, where it ends up.
+            final = {r.path: dst for r, dst in plan.moves}
+            taken = set(known_paths) | set(final.values())
+            targets = [(rec, duplicates.review_path(rec.path, os.path.dirname(final.get(keep, keep)), taken))
+                       for rec, keep in reviews]
+            # One all-or-nothing batch: moves, removals into the holding folder,
+            # and review files when they are moved.
+            ops = [RenameOp(Path(r.path), Path(dst)) for r, dst in plan.moves]
+            if not plan.permanent:
+                ops += [RenameOp(Path(r.path), Path(duplicates.removal_path(r.path, root, r.project)))
+                        for r in out["verified"]]
+            # The replaced copy goes to the holding folder (always, so it can be
+            # undone) and the version with notes takes its place and name.
+            for rec, old in replacing:
+                ops.append(RenameOp(Path(old.path), Path(duplicates.removal_path(old.path, root, old.project))))
+                ops.append(RenameOp(Path(rec.path), Path(old.path)))
+            out["replaced"] = [(rec.path, old.path) for rec, old in replacing]
+            if plan.review_mode == "move":
+                ops += [RenameOp(Path(r.path), Path(dst)) for r, dst in targets]
+                out["reviewed"] = [dst for _, dst in targets]
+            job.report(0, 0, f"Moving {len(ops):,} files…" if len(ops) != 1 else "Moving 1 file…")
+            out["applied"] = apply_renames(ops, out["created"], progress=lambda d, t: job.report(d, t)) if ops else []
+            if plan.permanent:
+                for rec in out["verified"]:
+                    try:
+                        os.remove(rec.path)
+                        out["deleted"].append(rec.path)
+                    except OSError as error:
+                        out["skipped"].append(f"{rec.name}: could not delete ({error})")
+            if plan.review_mode == "copy" and targets:
+                items = [offload.CopyItem(r.path, dst, r.size) for r, dst in targets]
+                job.report(0, 0, "Copying files for review…")
+                result = offload.copy_items(items, verify=True, progress=lambda st: job.report(
+                    st.done_bytes, max(st.total_bytes, 1), f"Copying {os.path.basename(st.current)} for review…"))
+                out["copied"] = [i.dst for i in result.copied]
+                out["reviewed"] = list(out["copied"])
+                out["skipped"] += [f"{os.path.basename(i.src)}: review copy failed ({why})"
+                                   for i, why in result.failed]
+            for n, (rec, path, name) in enumerate(plan.retags):
+                job.report(n, len(plan.retags), f"Writing the project name into {os.path.basename(path)}…")
+                try:
+                    bwf.update_metadata(path, {"project": name})
+                    out["retagged"].append((path, rec.meta_project))
+                except bwf.NeedsRewrite:
+                    out["need_rewrite"].append((rec, path, name))
+                except (OSError, bwf.WavError) as error:
+                    out["skipped"].append(f"{os.path.basename(path)}: project name not written ({error})")
+            if plan.remove_empty:
+                job.report(0, 0, "Removing empty folders…")
+                sources = {Path(r.path).parent for r in out["verified"]} | \
+                          {Path(r.path).parent for r, _ in plan.moves} | \
+                          {Path(r.path).parent for r, _ in replacing}
+                if plan.review_mode == "move":
+                    sources |= {Path(r.path).parent for r, _ in targets}
+                out["removed_dirs"], out["removed_markers"] = remove_left_empty(sources, root)
+            return out
+
+        return work
+
+    @staticmethod
+    def cleanup_paths(plan) -> set[str]:
+        return {r.path for r, _, _ in plan.removals} | {r.path for r, _ in plan.moves} | \
+               {r.path for r, _, _ in plan.retags} | {r.path for r, _ in plan.reviews}
+
+    def finish_cleanup(self, plan, out) -> dict:
+        """After the file work: update the library and the log. Returns the
+        undo parts, a summary and what was left alone (no dialogs here)."""
+        skipped, retagged = out["skipped"], out["retagged"]
+        applied = out["applied"]
+        gone = {str(op.src) for op in applied if catalog.REMOVED_FOLDER in Path(op.dst).parts} | set(out["deleted"])
+        moved = {str(op.src): str(op.dst) for op in applied if str(op.src) not in gone}
+        self._drop_from_library(gone)
+        self._refresh_moved(moved, reread=False)
+        self._reread([p for p, _ in retagged])
+        self._add_to_library(out["copied"])
+        parts = []
+        if applied:
+            parts.append({"kind": "rename", "label": plan.label, "applied": applied, "created": out["created"],
+                          "removed_dirs": out["removed_dirs"], "removed_markers": out["removed_markers"],
+                          "embed": False})
+        if out["copied"]:
+            parts.append({"kind": "copies", "label": plan.label, "paths": list(out["copied"])})
+        if retagged:
+            parts.append({"kind": "metadata", "label": plan.label,
+                          "entries": [(path, {"project": old}) for path, old in retagged]})
+        self._log("duplicates", label=plan.label, removed=sorted(gone - set(out["deleted"])),
+                  deleted_permanently=sorted(out["deleted"]), moved=[[a, b] for a, b in moved.items()],
+                  project_renamed=[p for p, _ in retagged], review=out["reviewed"], review_mode=plan.review_mode)
+        freed = sum(r.size for r in out["verified"])
+        moved_count = len(moved) - (len(out["reviewed"]) if plan.review_mode == "move" else 0) - \
+            len(out.get("replaced", []))
+        pieces = []
+        if out["verified"]:
+            pieces.append(f"removed {len(out['verified'])} duplicate(s) ({human_size(freed)})"
+                          + (" permanently" if plan.permanent else f" into “{catalog.REMOVED_FOLDER}”"))
+        if moved_count:
+            pieces.append(f"moved {moved_count} file(s) into the kept folder")
+        if retagged:
+            pieces.append(f"wrote the project name into {len(retagged)} file(s)")
+        if out.get("replaced"):
+            pieces.append(f"replaced {len(out['replaced'])} file(s) with a fuller version (notes or more tracks)")
+        if out["reviewed"]:
+            pieces.append(f"{'copied' if plan.review_mode == 'copy' else 'moved'} {len(out['reviewed'])} file(s) "
+                          f"that weren't the same next to the kept copy as “…{duplicates.REVIEW_TAG}”")
+        if out["removed_dirs"]:
+            pieces.append(f"removed {len(out['removed_dirs'])} empty folder(s)")
+        text = ", ".join(pieces) or "nothing changed"
+        return {"parts": parts, "summary": text[0].upper() + text[1:] + ".", "skipped": skipped,
+                "moved": moved, "freed": freed, "need_rewrite": out["need_rewrite"]}
+
+    def write_rewrites(self, need_rewrite, skipped: list[str]) -> list:
+        """Project names that only fit with a full rewrite: ask, then write.
+        Returns the undo part (or None)."""
+        if not need_rewrite:
+            return None
+        recs = [catalog.read_recording(path) for _, path, _ in need_rewrite]
+        if not RewriteDialog(recs, self).exec():
+            skipped += [f"{os.path.basename(p)}: project name skipped (would need a full rewrite)"
+                        for _, p, _ in need_rewrite]
+            return None
+        written = []
+
+        def rewrite(job):
+            failed = []
+            for n, (rec, path, name) in enumerate(need_rewrite):
+                job.report(n, len(need_rewrite), os.path.basename(path))
+                try:
+                    bwf.update_metadata(path, {"project": name}, allow_rewrite=True)
+                    written.append((path, rec.meta_project))
+                except (OSError, bwf.WavError) as err:
+                    failed.append(f"{os.path.basename(path)}: {err}")
+            return failed
+        failed, err = run_job(self, "Writing project names", rewrite)
+        skipped += failed or ([str(err)] if err else [])
+        self._reread([p for p, _ in written])
+        return {"kind": "metadata", "label": "project names",
+                "entries": [(path, {"project": old}) for path, old in written]} if written else None
+
+    def cleanups_done(self, label: str, parts: list, summary: str, skipped: list[str]):
+        """End of a cleanup or a batch: one undo step, the report, refresh."""
+        if parts:
+            self._push_undo({"kind": "compound", "label": label, "parts": parts})
+        if skipped:
+            show_report(self, "Duplicates", summary + " Some files were left alone:", skipped)
+        else:
+            self.statusBar().showMessage(summary, 12000)
+        if self._duplicates_window is not None:
+            self._duplicates_window.cleanup_finished()
+        if self._removed_window is not None:
+            self._removed_window.refresh()
+        self._tree_timer.start()
+
+    def apply_cleanup(self, plan):
+        """Remove duplicates / merge one project (see make_cleanup_work)."""
+        released = self._release_player(self.cleanup_paths(plan))
+        work = self.make_cleanup_work(plan)
+        result, error = run_job(self, "Removing duplicates" if not plan.moves else "Merging", work)
+        if error is not None:
+            self._restore_player(released, {})
+            QMessageBox.warning(self, APP_NAME, f"Nothing was changed:\n{error}" if isinstance(error, RenameError)
+                                else f"Failed: {error}")
+            return
+        if result["stopped"]:  # stopped while checking: nothing was changed
+            self._restore_player(released, {})
+            show_report(self, "Duplicates", "Stopped before anything was changed.", result["skipped"])
+            return
+        done = self.finish_cleanup(plan, result)
+        extra = self.write_rewrites(done["need_rewrite"], done["skipped"])
+        self._restore_player(released, done["moved"])
+        self.cleanups_done(plan.label, done["parts"] + ([extra] if extra else []), done["summary"], done["skipped"])
+
+    def _add_to_library(self, paths: list[str]):
+        if not paths:
+            return
+        cache = catalog.Cache(self.cache_file)
+        new = []
+        try:
+            for path in paths:
+                rec = catalog.read_recording(path)
+                self._assign([rec])
+                cache.put(rec, commit=False)
+                self._scan_seen.add(path)
+                if self.model.row_of(path) is None:
+                    new.append(rec)
+            cache.db.commit()
+        finally:
+            cache.close()
+        self.model.append(new)
+
+    # ------------------------------------------------------------ review & delete
+
+    def review_removed(self, compare: bool = False):
+        if self._removed_window is None:
+            window = RemovedDialog(lambda: self.root, lambda: list(self.model.recs), self)
+            window.deleteRequested.connect(self.delete_for_good)
+            window.restoreRequested.connect(self.put_back_removed)
+            window.swapRequested.connect(self.keep_marked_copy)
+            window.playRequested.connect(self._play_path)
+            self._removed_window = window
+        self._removed_window.refresh()
+        if compare:
+            self._removed_window.tabs.setCurrentIndex(1)
+        self._removed_window.show()
+        self._removed_window.raise_()
+        self._removed_window.activateWindow()
+
+    def _play_path(self, path: str):
+        rec = catalog.read_recording(path)
+        self._assign([rec])
+        self._current_path = path
+        self.player.load(rec)
+        self.player.toggle_play()
+
+    def delete_for_good(self, paths: list[str], what: str):
+        """Permanently delete files (from Review & Delete; the user confirmed)."""
+        if self.player.rec is not None and self.player.rec.path in paths:
+            self.player.load(None)
+        holding = os.path.join(self.root, catalog.REMOVED_FOLDER)
+
+        def work(job):
+            deleted, failed = [], []
+            for n, path in enumerate(paths):
+                job.report(n, len(paths), f"Deleting {os.path.basename(path)}…")
+                try:
+                    os.remove(path)
+                    deleted.append(path)
+                except OSError as error:
+                    failed.append(f"{os.path.basename(path)}: {error}")
+            _tidy_holding(deleted, holding)
+            # Folders that held only these files (e.g. review copies) go too.
+            remove_left_empty({Path(p).parent for p in deleted}, self.root)
+            return deleted, failed
+
+        result, error = run_job(self, "Deleting", work, cancellable=False)
+        if error is not None:
+            QMessageBox.warning(self, APP_NAME, f"Deleting failed: {error}")
+            return
+        deleted, failed = result
+        self._drop_from_library(set(deleted))
+        self._forget_undo_for(set(deleted))
+        self._log("delete for good", what=what, files=deleted)
+        summary = f"Deleted {len(deleted)} file(s) for good."
+        if failed:
+            show_report(self, "Delete", summary + " Some could not be deleted:", failed)
+        else:
+            self.statusBar().showMessage(summary, 8000)
+        if self._removed_window is not None:
+            self._removed_window.refresh()
+
+    def delete_empty_folders(self, parent=None):
+        """Find folders anywhere in the library that hold nothing but recorder
+        marker files, list them, and delete them if the user agrees (undoable)."""
+        parent = parent or self
+        root = self.root
+        if not root:
+            return
+
+        def find(job):
+            return find_empty_folders(root, cancelled=lambda: job.cancelled,
+                                      progress=lambda n, path: job.report(0, 0, f"Looked in {n:,} folders… "
+                                                                                f"{os.path.relpath(path, root)}"))
+
+        folders, error = run_job(parent, "Looking for empty folders", find)
+        if error is not None:
+            QMessageBox.warning(parent, APP_NAME, f"Could not look for empty folders: {error}")
+            return
+        if folders is None:
+            return
+        if not folders:
+            QMessageBox.information(parent, "Delete Empty Folders", "There are no empty folders in the library.")
+            return
+        box = QMessageBox(QMessageBox.Icon.Question, "Delete Empty Folders",
+                          f"Delete {len(folders):,} empty folder{'s' if len(folders) != 1 else ''}?", parent=parent)
+        box.setInformativeText("They hold no audio or other files, only the recorders' marker files "
+                               "(.take_folder, .daily_folder, .DS_Store), also in any subfolders. Each one is "
+                               "checked again just before it is deleted. You can undo this.\n\n" +
+                               "\n".join(os.path.relpath(f, root) for f in folders[:12]) +
+                               (f"\n… and {len(folders) - 12:,} more (see Show Details)" if len(folders) > 12 else ""))
+        box.setDetailedText("\n".join(os.path.relpath(f, root) for f in folders))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText("Delete Empty Folders")
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        def remove(job):
+            dirs, markers, kept = [], [], []
+            for n, folder in enumerate(folders):
+                job.report(n, len(folders), f"Deleting {os.path.relpath(folder, root)}…")
+                d, m = remove_tree_if_empty(folder)
+                dirs += d
+                markers += m
+                if folder not in d:
+                    kept.append(f"{os.path.relpath(folder, root)}: no longer empty, or could not be deleted")
+            # Parents emptied by this go as well.
+            more_dirs, more_markers = remove_left_empty({f.parent for f in folders}, root)
+            return dirs + more_dirs, markers + more_markers, kept
+
+        result, error = run_job(parent, "Deleting empty folders", remove, cancellable=False)
+        if error is not None:
+            QMessageBox.warning(parent, APP_NAME, f"Deleting failed: {error}")
+            return
+        dirs, markers, kept = result
+        if dirs:
+            self._push_undo({"kind": "rename", "label": f"deleting {len(dirs):,} empty folders", "applied": [],
+                             "created": [], "removed_dirs": dirs, "removed_markers": markers, "embed": False})
+            self._log("delete empty folders", folders=[str(d) for d in dirs])
+        summary = f"Deleted {len(dirs):,} empty folder{'s' if len(dirs) != 1 else ''}."
+        if kept:
+            show_report(parent, "Delete Empty Folders", summary + " Some were left:", kept)
+        else:
+            self.statusBar().showMessage(summary, 8000)
+            QMessageBox.information(parent, "Delete Empty Folders", summary)
+
+    def put_back_removed(self, pairs: list[tuple[str, str]]):
+        """Move files from the removed-duplicates folder back where they were."""
+        blocked = [f"{os.path.basename(dst)}: something is already at {dst}" for _, dst in pairs
+                   if os.path.lexists(dst)]
+        ops = [RenameOp(Path(src), Path(dst)) for src, dst in pairs if not os.path.lexists(dst)]
+        if not ops:
+            show_report(self, "Put back", "Nothing was put back.", blocked)
+            return
+        released = self._release_player({src for src, _ in pairs})
+
+        holding = os.path.join(self.root, catalog.REMOVED_FOLDER)
+
+        def work(job):
+            created: list[Path] = []
+            applied = apply_renames(ops, created, progress=lambda d, t: job.report(d, t))
+            _tidy_holding([str(op.src) for op in applied], holding)
+            return applied, created
+
+        result, error = run_job(self, "Putting files back", work, cancellable=False)
+        self._restore_player(released, {})
+        if error is not None:
+            QMessageBox.warning(self, APP_NAME, f"Nothing was put back:\n{error}")
+            return
+        applied, created = result
+        self._push_undo({"kind": "rename", "label": f"putting back {len(applied)} file(s)", "applied": applied,
+                         "created": created, "removed_dirs": [], "removed_markers": [], "embed": False})
+        self._add_to_library([str(op.dst) for op in applied])
+        self._log("put back", files=[[str(op.src), str(op.dst)] for op in applied])
+        summary = f"Put {len(applied)} file(s) back."
+        if blocked:
+            show_report(self, "Put back", summary + " Some were left in the folder:", blocked)
+        else:
+            self.statusBar().showMessage(summary, 8000)
+        if self._removed_window is not None:
+            self._removed_window.refresh()
+        self._tree_timer.start()
+
+    def keep_marked_copy(self, marked: str, kept: str, target: str):
+        """Keep a _ReviewForDeletion copy instead of its pair: the pair goes to
+        the removed-duplicates folder, the marked copy takes its name (undoable)."""
+        row = self.model.row_of(kept)
+        project = self.model.recs[row].project if row is not None else ""
+        released = self._release_player({marked, kept})
+        ops = [RenameOp(Path(kept), Path(duplicates.removal_path(kept, self.root, project))),
+               RenameOp(Path(marked), Path(target))]
+
+        def work(job):
+            created: list[Path] = []
+            return apply_renames(ops, created, progress=lambda d, t: job.report(d, t)), created
+
+        result, error = run_job(self, "Keeping the marked copy", work, cancellable=False)
+        self._restore_player(released, {})
+        if error is not None:
+            QMessageBox.warning(self, APP_NAME, f"Nothing was changed:\n{error}")
+            return
+        applied, created = result
+        self._drop_from_library({kept})
+        self._refresh_moved({marked: target}, reread=False)
+        self._push_undo({"kind": "compound", "label": f"keeping {os.path.basename(marked)}",
+                         "parts": [{"kind": "rename", "label": "keep marked copy", "applied": applied,
+                                    "created": created, "removed_dirs": [], "removed_markers": [],
+                                    "embed": False}]})
+        self._log("keep marked copy", marked=marked, kept_moved_to=str(ops[0].dst), renamed_to=target)
+        self.statusBar().showMessage(f"Kept {os.path.basename(marked)} as {os.path.basename(target)}; the other "
+                                     f"copy is in “{catalog.REMOVED_FOLDER}”.", 8000)
+        if self._removed_window is not None:
+            self._removed_window.refresh()
+
+    def _forget_undo_for(self, deleted: set[str]):
+        """Drop undo steps that would need files that are now deleted for good."""
+        def touches(entry) -> bool:
+            parts = entry["parts"] if entry["kind"] == "compound" else [entry]
+            for part in parts:
+                if part["kind"] == "rename" and any(str(op.dst) in deleted for op in part["applied"]):
+                    return True
+                if part["kind"] == "copies" and any(p in deleted for p in part["paths"]):
+                    return True
+            return False
+        before = len(self.undo_stack)
+        self.undo_stack = [e for e in self.undo_stack if not touches(e)]
+        if len(self.undo_stack) != before:
+            self.act_undo.setEnabled(bool(self.undo_stack))
+            self.act_undo.setText(f"Undo {self.undo_stack[-1]['label']}" if self.undo_stack else "Undo")
+
+    def _undo_copies(self, part):
+        """Undo review copies: delete the copies (the originals were never touched)."""
+        removed = []
+        for path in part["paths"]:
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError:
+                pass
+        self._drop_from_library(set(removed))
+        self._log("undo " + part["label"], deleted_copies=removed)
+
+    def _drop_from_library(self, paths: set[str]):
+        if not paths:
+            return
+        cache = catalog.Cache(self.cache_file)
+        try:
+            cache.forget(paths)
+        finally:
+            cache.close()
+        self._reset_keep_selection([r for r in self.model.recs if r.path not in paths])
+        self._scan_seen -= paths
 
     # ------------------------------------------------------------ metadata
 
@@ -1244,3 +1887,15 @@ def _values_of(rec: Recording, changes: dict) -> dict:
     for key in changes:
         values[key] = rec.meta_project if key == "project" else getattr(rec, key)
     return values
+
+
+def _tidy_holding(paths, holding: str) -> None:
+    """Remove folders inside the removed-duplicates folder that are now empty
+    (including the holding folder itself when nothing is left)."""
+    for folder in sorted({os.path.dirname(p) for p in paths}, key=len, reverse=True):
+        while (folder + "/").startswith(holding.rstrip("/") + "/"):
+            try:
+                os.rmdir(folder)
+            except OSError:
+                break
+            folder = os.path.dirname(folder)

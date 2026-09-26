@@ -40,8 +40,9 @@ class ScanThread(QThread):
 
 
 class JobThread(QThread):
-    """Runs fn(report) where report(done, total, text) updates the dialog.
-    Cancellation is cooperative: fn checks job.cancelled."""
+    """Runs fn(report) where report(done, total, text) updates the dialog
+    (total 0 shows a moving bar). Cancellation is cooperative: fn checks
+    job.cancelled."""
 
     progress = Signal(int, int, str)
 
@@ -76,8 +77,9 @@ def run_job(parent: QWidget, title: str, fn: Callable, *, cancellable: bool = Tr
     job = JobThread(fn, parent)
 
     def on_progress(done, total, text):
-        dialog.setMaximum(max(total, 1))
-        dialog.setValue(done)
+        # A total of 0 means "working, amount unknown": a moving (busy) bar.
+        dialog.setRange(0, max(total, 0))
+        dialog.setValue(min(done, total) if total > 0 else 0)
         if text:
             dialog.setLabelText(text)
 

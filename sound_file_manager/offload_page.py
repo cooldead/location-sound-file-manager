@@ -148,7 +148,7 @@ class OffloadPage(QWidget):
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.tree.setToolTip("Tick the days to copy. Double-click a NAS folder name to change it.")
+        self.tree.setToolTip("Check the days to copy. Double-click a NAS folder name to change it.")
         self.tree.itemChanged.connect(self._tree_item_changed)
         self.tree.currentItemChanged.connect(lambda *_: self._apply_scope())
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
@@ -712,7 +712,7 @@ class OffloadPage(QWidget):
         return [self.model.effective(r) for r in recs] if effective else recs
 
     def report_groups(self) -> list[ReportGroup]:
-        """One report per ticked card project, with only that project's files."""
+        """One report per checked card project, with only that project's files."""
         by_folder: dict[str, list[Recording]] = defaultdict(list)
         for rec in self.selected_recordings():  # a pending rename keeps the file in its folder
             by_folder[offload.project_folder(rec.path, self.card.path)].append(rec)
@@ -729,7 +729,7 @@ class OffloadPage(QWidget):
     def edit_report(self):
         groups = self.report_groups() if self.card else []
         if not groups:
-            QMessageBox.information(self, "Sound Report", "Tick the days to copy first; the reports cover them.")
+            QMessageBox.information(self, "Sound Report", "Check the days to copy first; the reports cover them.")
             return
         dialog = ReportDialog(groups, self.qsettings, mode="export", parent=self)
         if dialog.exec():
@@ -745,7 +745,7 @@ class OffloadPage(QWidget):
         groups = self.report_groups() if self.card else []
         where = "each project folder" if self.report_per.currentData() == "project" else "each day folder"
         if not groups:
-            self.report_label.setText("Sound reports: tick the days to copy.")
+            self.report_label.setText("Sound reports: check the days to copy.")
         elif not self.report_infos:
             self.report_label.setText(f"{len(groups)} sound report(s), one per project, saved in {where}; filled in "
                                       "from the files and your saved details. Open them to add the director, "
@@ -787,7 +787,7 @@ class OffloadPage(QWidget):
                          "with the same name is on the NAS. They are skipped; rename them (File column) "
                          "or change the NAS folder.</span>")
             if not chosen:
-                text = "Tick the days to copy in the list on the left."
+                text = "Check the days to copy in the list on the left."
             self.summary.setText(text)
             touched = [i for i in chosen if i.src in self.model.pending and i.status != "conflict"]
             self.copy_button.setEnabled(not busy and bool(new or touched))

@@ -270,13 +270,14 @@ class RecordingsModel(QAbstractTableModel):
 
 
 class RecordingsProxy(QSortFilterProxyModel):
-    """Filters by the sidebar selection (project / day), a search text and circled-only."""
+    """Filters by the sidebar selection (year / month / project / day), a search text and circled-only."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSortRole(SORT_ROLE)
         self.project: str | None = None  # None = all
         self.day: str | None = None
+        self.period: str | None = None  # a year / month (see in_period)
         self.text = ""
         self.circled_only = False
         self.allowed: set[str] | None = None  # only these paths (the Offload page's tree selection)
@@ -285,8 +286,8 @@ class RecordingsProxy(QSortFilterProxyModel):
         self.allowed = paths
         self.invalidateFilter()
 
-    def set_scope(self, project: str | None, day: str | None):
-        self.project, self.day = project, day
+    def set_scope(self, project: str | None, day: str | None, period: str | None = None):
+        self.project, self.day, self.period = project, day, period
         self.invalidateFilter()
 
     def set_text(self, text: str):
@@ -304,6 +305,8 @@ class RecordingsProxy(QSortFilterProxyModel):
         if self.project is not None and (rec.project or NO_PROJECT) != self.project:
             return False
         if self.day is not None and (day_of(rec) or NO_DAY) != self.day:
+            return False
+        if not in_period(rec, self.period):
             return False
         if self.circled_only and not rec.circled:
             return False
@@ -324,35 +327,115 @@ class RecordingsProxy(QSortFilterProxyModel):
 
 PROJECT_ROLE = Qt.ItemDataRole.UserRole + 10
 DAY_ROLE = Qt.ItemDataRole.UserRole + 11
+PERIOD_ROLE = Qt.ItemDataRole.UserRole + 12  # "2026" or "2026-09" ("" = no date, None = any)
+
+MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+          "October", "November", "December"]
 
 
-def build_project_tree(model: QStandardItemModel, recs: list[Recording]) -> None:
-    """All recordings, then one node per project with its recording days."""
-    model.clear()
-    counts: dict[str, dict[str, int]] = {}
+def in_period(rec: Recording, period: str | None) -> bool:
+    """Whether a recording falls in a sidebar period: a year "2026", a month
+    "2026-09", "" for recordings without a date, or None for any."""
+    if period is None:
+        return True
+    if period == "":
+        return not rec.date
+    return rec.date.startswith(period)
+
+
+def period_label(period: str) -> str:
+    if not period:
+        return NO_DAY
+    if len(period) == 7 and period[5:].isdigit() and 1 <= int(period[5:]) <= 12:
+        return MONTHS[int(period[5:]) - 1]
+    return period
+
+
+def _count(recs: list[Recording], counts: str) -> str:
+    """"  (12)": projects ("projects"), recordings ("files") or both ("12 / 1,182")."""
+    files = len(recs)
+    projects = len({r.project or NO_PROJECT for r in recs})
+    if counts == "files":
+        return f"  ({files:,})"
+    if counts == "both":
+        return f"  ({projects:,} / {files:,})"
+    return f"  ({projects:,})"
+
+
+def _count_tip(recs: list[Recording]) -> str:
+    projects = len({r.project or NO_PROJECT for r in recs})
+    return f"{projects:,} project{'s' if projects != 1 else ''}, {len(recs):,} recording{'s' if len(recs) != 1 else ''}"
+
+
+def _node(text: str, project, day, period, tip: str = "") -> QStandardItem:
+    item = QStandardItem(text)
+    item.setData(project, PROJECT_ROLE)
+    item.setData(day, DAY_ROLE)
+    item.setData(period, PERIOD_ROLE)
+    item.setEditable(False)
+    if tip:
+        item.setToolTip(tip)
+    return item
+
+
+def _project_nodes(parent: QStandardItem | QStandardItemModel, recs: list[Recording], period,
+                   counts: str = "projects") -> None:
+    """One node per project (alphabetical) with its recording days. Project
+    and day nodes show their recordings only when files are counted."""
+    tally: dict[str, dict[str, int]] = {}
     for rec in recs:
-        days = counts.setdefault(rec.project or NO_PROJECT, {})
+        days = tally.setdefault(rec.project or NO_PROJECT, {})
         day = day_of(rec) or NO_DAY
         days[day] = days.get(day, 0) + 1
-    everything = QStandardItem(f"All recordings  ({len(recs):,})")
-    everything.setData(None, PROJECT_ROLE)
-    everything.setData(None, DAY_ROLE)
+    show_files = counts in ("files", "both")
+    for project in sorted(tally, key=lambda p: (p == NO_PROJECT, p.casefold())):
+        days = tally[project]
+        total = sum(days.values())
+        item = _node(f"{project}  ({total:,})" if show_files else project, project, None, period,
+                     f"{project}: {total:,} recording{'s' if total != 1 else ''}")
+        for day in sorted(days, key=lambda d: (d == NO_DAY, d)):
+            item.appendRow(_node(f"{day}  ({days[day]:,})" if show_files else day, project, day, period,
+                                 f"{days[day]:,} recording{'s' if days[day] != 1 else ''}"))
+        parent.appendRow(item)
+
+
+def build_project_tree(model: QStandardItemModel, recs: list[Recording], by_date: bool = False,
+                       counts: str = "files") -> None:
+    """All recordings, then either one node per project with its recording days,
+    or (by_date) years, newest first -> the months that have recordings ->
+    the projects recorded that month -> their days. counts: what the numbers
+    count, "projects", "files" or "both" (tooltips always give both)."""
+    model.clear()
+    everything = _node(f"All recordings{_count(recs, counts)}", None, None, None, _count_tip(recs))
     bold = everything.font()
     bold.setBold(True)
     everything.setFont(bold)
-    everything.setEditable(False)
     model.appendRow(everything)
-    for project in sorted(counts, key=lambda p: (p == NO_PROJECT, p.casefold())):
-        days = counts[project]
-        item = QStandardItem(f"{project}  ({sum(days.values()):,})")
-        item.setData(project, PROJECT_ROLE)
-        item.setData(None, DAY_ROLE)
-        item.setEditable(False)
-        item.setToolTip(project)
-        for day in sorted(days, key=lambda d: (d == NO_DAY, d)):
-            child = QStandardItem(f"{day}  ({days[day]:,})")
-            child.setData(project, PROJECT_ROLE)
-            child.setData(day, DAY_ROLE)
-            child.setEditable(False)
-            item.appendRow(child)
-        model.appendRow(item)
+    if not by_date:
+        _project_nodes(model, recs, None, counts)
+        return
+    by_month: dict[str, list[Recording]] = {}
+    for rec in recs:
+        month = rec.date[:7] if len(rec.date) >= 7 and rec.date[:4].isdigit() else ""
+        by_month.setdefault(month, []).append(rec)
+    years: dict[str, list[str]] = {}
+    for month in by_month:
+        if month:
+            years.setdefault(month[:4], []).append(month)
+    for year in sorted(years, reverse=True):
+        months = sorted(years[year], reverse=True)
+        year_recs = [r for m in months for r in by_month[m]]
+        year_item = _node(f"{year}{_count(year_recs, counts)}", None, None, year, f"{year}: {_count_tip(year_recs)}")
+        year_item.setFont(bold)
+        for month in months:
+            month_item = _node(f"{period_label(month)}{_count(by_month[month], counts)}", None, None, month,
+                               f"{period_label(month)} {year}: {_count_tip(by_month[month])}")
+            _project_nodes(month_item, by_month[month], month, counts)
+            year_item.appendRow(month_item)
+        model.appendRow(year_item)
+    if "" in by_month:
+        undated = _node(f"{NO_DAY}{_count(by_month[''], counts)}", None, None, "",
+                        f"Recordings without a date in their metadata: {_count_tip(by_month[''])}")
+        undated.setFont(bold)
+        _project_nodes(undated, by_month[""], "", counts)
+        model.appendRow(undated)

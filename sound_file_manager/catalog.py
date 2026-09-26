@@ -19,6 +19,9 @@ from . import bwf
 from . import timecode as tc
 
 AUDIO_EXTENSIONS = {".wav", ".bwf"}
+# Where "remove duplicates" puts files (on the same share, so it is a rename
+# and can be undone); never scanned.
+REMOVED_FOLDER = "_Removed Duplicates"
 CACHE_VERSION = 1
 # Bumped when the parser learns to read more; entries it may have misread are
 # dropped and read again on the next scan (not the whole cache).
@@ -179,6 +182,37 @@ def assign_projects(recordings: Iterable[Recording], root: str, containers: Iter
             rec.project, rec.project_from = (name, "folder") if name else ("", "")
 
 
+def project_folder_of(recs: Iterable[Recording], root: str, containers: Iterable[str]) -> str:
+    """The folder that holds a project: the folder named like the project if
+    there is one, else the first folder below the library that is not a
+    card/backup container; the most common one wins."""
+    skip = {c.casefold() for c in containers}
+    votes: dict[str, int] = {}
+    recs = list(recs)
+    for rec in recs:
+        try:
+            parts = Path(rec.path).relative_to(root).parts[:-1]
+        except ValueError:
+            continue
+        chosen = None
+        for i, part in enumerate(parts):
+            if rec.project and part.casefold() == rec.project.casefold():
+                chosen = parts[:i + 1]
+                break
+        if chosen is None:
+            for i, part in enumerate(parts):
+                if part.casefold() not in skip:
+                    chosen = parts[:i + 1]
+                    break
+        if chosen:
+            folder = os.path.join(root, *chosen)
+            votes[folder] = votes.get(folder, 0) + 1
+    if votes:
+        return max(votes, key=lambda f: (votes[f], -len(f)))
+    folders = [os.path.dirname(r.path) for r in recs]
+    return os.path.commonpath(folders) if folders else ""
+
+
 def day_of(rec: Recording) -> str:
     """Grouping below a project: recording date, else the tape name."""
     return rec.date or rec.tape or ""
@@ -207,6 +241,7 @@ class Cache:
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('version', ?)", (str(CACHE_VERSION),))
         self.db.execute("CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, size INT, mtime REAL, data TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS peaks (path TEXT PRIMARY KEY, size INT, mtime REAL, data BLOB)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS hashes (path TEXT PRIMARY KEY, size INT, mtime REAL, sample TEXT)")
         row = self.db.execute("SELECT value FROM meta WHERE key='parser'").fetchone()
         if row is None or int(row[0]) < PARSER_VERSION:
             # v2 reads iXML with a stale tail after a NUL (Sound Devices 833).
@@ -252,6 +287,7 @@ class Cache:
         for path in paths:
             self.db.execute("DELETE FROM files WHERE path=?", (path,))
             self.db.execute("DELETE FROM peaks WHERE path=?", (path,))
+            self.db.execute("DELETE FROM hashes WHERE path=?", (path,))
         self.db.commit()
 
     def prune(self, root: str, keep: set[str]) -> int:
@@ -261,6 +297,15 @@ class Cache:
                                                 (len(prefix), prefix)) if p not in keep]
         self.forget(stale)
         return len(stale)
+
+    def get_hash(self, path: str, size: int, mtime: float) -> str | None:
+        row = self.db.execute("SELECT size, mtime, sample FROM hashes WHERE path=?", (path,)).fetchone()
+        if row is None or row[0] != size or abs(row[1] - mtime) > 1e-6:
+            return None
+        return row[2]
+
+    def put_hash(self, path: str, size: int, mtime: float, sample: str) -> None:
+        self.db.execute("INSERT OR REPLACE INTO hashes VALUES (?, ?, ?, ?)", (path, size, mtime, sample))
 
     def get_peaks(self, path: str, size: int, mtime: float) -> bytes | None:
         row = self.db.execute("SELECT size, mtime, data FROM peaks WHERE path=?", (path,)).fetchone()
@@ -275,6 +320,7 @@ class Cache:
     def clear(self) -> None:
         self.db.execute("DELETE FROM files")
         self.db.execute("DELETE FROM peaks")
+        self.db.execute("DELETE FROM hashes")
         self.db.commit()
 
 
@@ -299,7 +345,7 @@ def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False):
         for entry in items:
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    if not entry.name.startswith("."):
+                    if not entry.name.startswith(".") and entry.name != REMOVED_FOLDER:
                         subfolders.append(entry.path)
                 elif entry.is_file() and is_audio_file(entry.name):
                     yield entry.path, entry.stat()

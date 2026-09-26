@@ -156,3 +156,69 @@
 - Cause 1: report tests created a `QGuiApplication` that the dialog tests then used for widgets.
 - Cause 2: dialogs in reference cycles were freed after the QApplication.
 - Fixed with a shared `qt_app()`, explicit disposal in tests, and freeing the window in `__main__`. Six clean runs in a row afterwards.
+
+## 2026-09-26: find duplicates
+
+**Request:** in the Library, scan for duplicate files and duplicate projects. Merge them if the files inside differ, delete them if they are the same. _ISO and _LR of a take should be kept together in one folder.
+
+**Built:**
+- `duplicates.py` and the Find Duplicates window. Details in CLAUDE.md.
+
+**Findings on the real library** (read-only dry runs):
+- 21.6k recordings; ~11.7k are candidates, with up to ~620 GB in possible extra copies.
+- 5 "spelling" groups, 3 "similar" groups, and ~110 folders that exist in several places (card dumps).
+- A folder copied three times: 47 byte-identical and 7 audio-identical copies (second-card layout), 2.5 GB.
+
+**Design fixes found while testing:**
+- "Same project in several folders" first used the metadata project name, which flagged a project whose files were in another shoot's folder (the recorder's project name wasn't changed), plus FALSETAKES/Recovered. It now means folders with the same name in different places, and leftover folders are excluded.
+- Identical vs different was judged per group. It's now judged per copy against the kept one.
+- Merges proposed removing a twin that had an extra note. Such twins are now skipped, with the reason.
+- Fingerprints: 99 → ~50 ms per file by avoiding CIFS read-ahead.
+
+**Verified:**
+- 96 unit tests.
+- A GUI smoke test on a scratch library: remove to the holding folder, then undo; merge folders; merge a name (move plus project name), then undo.
+- A screenshot of the window.
+
+**Follow-ups from testing:**
+- "Check/uncheck" wording.
+- Wider keep-folder and project-name fields.
+- Find Duplicate Projects runs in the background, with a progress bar and message.
+- `_Removed Duplicates` is sorted by original project.
+- Merge into a new folder, with a suggested name.
+- Review & Delete window (removed-duplicates folder and `_ReviewForDeletion` files: play, put back, delete for good).
+- Files that are not byte for byte the same can be copied (default) or moved next to the kept copy as `<name>_ReviewForDeletion`, instead of being left or removed on an audio match.
+- The new-folder path is shown under its name.
+- Speed: Find Duplicate Projects went from 29 s to 0.37 s (folder index, string paths; results checked identical to the old code on the real library). A first Duplicate Files scan fingerprints about a third of the files (one per distinct name in a candidate group). After a merge the project search re-runs automatically.
+- Batch merge: check groups (or a category), merge them one after another with a progress bar and result per group, optionally each into a new folder named after it; empty folders removed; one undo step; failure report at the end. The cleanup code was split into work / finish steps shared by single and batch merges.
+- _ISO/_LR rule: a take's files are always kept together and never renamed; only exact same-name repeats are removed (notes ignored, audio checked); never split a take. Keepers prefer copies with notes.
+- Compare Marked Files: `_ReviewForDeletion` files paired with their closest copy, differences highlighted, play both, audio comparison, delete or keep the marked copy instead.
+- Versions with notes are preferred: a copy with a note or circle the kept copy lacks replaces it in place (audio checked; the old copy goes to the holding folder), in single merges, batch merges and Duplicate Files.
+- Versions with more tracks are preferred in merges: same take with a different channel count (e.g. with and without the mix tracks); the smaller file is removed or replaced only after verifying all its channels are in the larger one.
+
+## 2026-09-26: mixer, colour waveform, year/month sidebar
+
+**Request:** a layout closer to Sound Devices Wave Agent X: a channel mixer at the bottom with all its features, a cleaner waveform in a different colour per track. Also a busy bar while a single merge works, the Library sorted by year and month, and a Delete Empty Folders button (nested empty folders such as `Orchard/25Y10M31/.daily_folder` survived merges).
+
+**Built:**
+- Playback moved from libmpv to `audio_engine.py` (Qt Multimedia `QAudioSink` + a reader thread), mixed live by `mixer.py`. Why: mpv's `af` can't change per-channel gains smoothly or report per-channel levels.
+- `mixer_panel.py`: master and channel strips (colour, M/S, automation A/✕, meter with hold and clip, fader, dB, link, pan), Solo Mode, Mute All, Arm All, Clear All Automation, Save/Load Automation (`.mix.json`), auto trim.
+- Waveform: peak + RMS per bucket (2000 buckets, new cache format), `rasterize()` with a colour per track, anti-aliased, overlay or lanes, dB or linear; drag regions and loop; prev/next file buttons.
+- Sidebar: year → month → project → day (or A–Z by name).
+- Progress: a total of 0 means a moving bar; cleanups start busy, and retags and empty-folder removal report progress.
+- Empty folders: removal is recursive; Delete Empty Folders in the Find Duplicates window (undoable); Delete for good prunes folders it empties.
+
+**Verified:** 121 unit tests; GUI smoke tests (play with a muted master, meters, automation writes, region loop, file stepping, year/month tree, Delete Empty Folders + undo, earlier merge/batch scripts). A read-only dry run on the real library found 273 empty folders in ~7 s (none deleted).
+
+## 2026-09-26: markers, zoom, sharper waveform, project counts
+
+**Request:** Wave Agent style markers and zoom; a sharper waveform ("still very undefined"); the sidebar years and months should count projects, not files (files optional).
+
+**Built:**
+- Markers: add at the playhead (M), drag, name (double-click), delete, previous/next (, .); stored per path in `markers.sqlite` and moved with the files; recorder cue chunks shown read only.
+- Zoom: wheel / buttons / keys, time ruler, scrollbar, follows the playhead; vertical zoom. Zoomed views are re-read from the file at pixel resolution.
+- Sharper: 4096-bucket overview (was 2000, stretched and smeared on wide/HiDPI screens), full-colour peak outline instead of a dimmed half-tone edge.
+- Sidebar numbers count projects by default; the # button switches to files or both.
+
+**Verified:** 125 unit tests; smoke test with screenshots of the full and zoomed views, marker add/jump/move.
+

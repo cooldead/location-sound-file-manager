@@ -208,8 +208,8 @@ def _fill_preview(tree: QTreeWidget, rows: list[tuple[str, str, organize.Move]])
 class MetadataDialog(QDialog):
     """Edit project/scene/take/tape/note/circled for one or many files.
 
-    With several files, a field is only changed if its "Change" box is ticked
-    (typing ticks it), so differing values are never flattened by accident.
+    With several files, a field is only changed if its "Change" box is checked
+    (typing checks it), so differing values are never flattened by accident.
     """
 
     LABELS = [("project", "Project"), ("scene", "Scene"), ("take", "Take"), ("tape", "Tape"), ("note", "Note")]
