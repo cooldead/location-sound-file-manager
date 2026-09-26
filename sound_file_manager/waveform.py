@@ -25,7 +25,8 @@ SAMPLE_BYTES = 64 << 10
 QUICK_PREVIEW_ABOVE = 48 << 20  # show a coarse outline first for files bigger than this
 QUICK_PREVIEW_SLOTS = 48
 FLOOR_DB = -60.0
-MAGIC = b"\xffW2"  # cache blobs with peak + RMS (older blobs held peaks only)
+MAGIC = b"\xffW2"
+OVER_LEVEL = 254.5 / 255  # a peak level at full scale (as stored in the cache, uint8)  # cache blobs with peak + RMS (older blobs held peaks only)
 
 
 def decode(raw: bytes, bits: int, channels: int, is_float: bool) -> np.ndarray:
@@ -55,6 +56,9 @@ def decode(raw: bytes, bits: int, channels: int, is_float: bool) -> np.ndarray:
         samples = (np.frombuffer(raw, np.uint8).astype(np.float32) - 128.0) / 128.0
     else:
         raise bwf.WavError(f"unsupported sample format ({bits}-bit)")
+    if is_float and len(samples) and not np.isfinite(samples).all():
+        # A damaged float file: NaN / infinity would break the meters and drawing.
+        samples = np.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=-1.0)
     return samples.reshape(-1, channels)
 
 
@@ -229,11 +233,21 @@ def rasterize(levels: np.ndarray, width: int, height: int, *, colors: list[str],
     in one lane, in each column the loudest behind and the quietest in front
     (so every track stays visible); "lanes" gives each channel its own lane.
     Channels that are not audible (muted / not soloed) are drawn grey.
-    gain > 1 zooms the height (vertical zoom), clipping at the lane edge."""
+    gain > 1 zooms the height (vertical zoom), clipping at the lane edge.
+    Columns that reach full scale (0 dBFS: clipped, or over 0 dBFS in a
+    32-bit float file) get a red mark at the lane's top and bottom."""
     channels = levels.shape[1]
     width, height = max(int(width), 1), max(int(height), 1)
     audible = [True] * channels if audible is None else list(audible) + [True] * (channels - len(audible))
     amp = column_levels(levels, width)
+    # Full-scale peaks per column, before any vertical zoom; stretched out,
+    # from the nearest bucket (interpolation would blur a single over away).
+    buckets = levels.shape[2]
+    if buckets >= width:
+        over = amp[0] >= OVER_LEVEL
+    else:
+        nearest = np.minimum(((np.arange(width) + 0.5) * buckets / width).astype(np.int64), buckets - 1)
+        over = levels[0][:, nearest] >= OVER_LEVEL
     if scale == "linear":
         amp = np.clip(to_linear(amp) * gain, 0.0, 1.0)
     elif gain != 1.0:
@@ -256,6 +270,8 @@ def rasterize(levels: np.ndarray, width: int, height: int, *, colors: list[str],
             target *= 1 - cover
             target += cover * rgb
 
+    red = np.array([255, 59, 48], np.float32)
+    mark = max(2, height // 60)
     if mode == "lanes":
         lane = height / channels
         for c in range(channels):
@@ -265,6 +281,9 @@ def rasterize(levels: np.ndarray, width: int, height: int, *, colors: list[str],
             ys = (np.arange(top, bottom, dtype=np.float32) + 0.5)[:, None]
             paint(image[top:bottom], ys, (top + bottom) / 2, max((bottom - top) / 2 - 1.5, 0.5),
                   amp[0, c][None, :], amp[1, c][None, :], edge[c], body[c])
+            if over[c].any() and bottom - top > 2 * mark:
+                image[top:top + mark, over[c]] = red
+                image[bottom - mark:bottom, over[c]] = red
     else:
         ys = (np.arange(height, dtype=np.float32) + 0.5)[:, None]
         # Loudest first: sort the channels per column by peak, descending.
@@ -275,5 +294,9 @@ def rasterize(levels: np.ndarray, width: int, height: int, *, colors: list[str],
             chosen = order[rank]
             paint(image, ys, height / 2, max(height / 2 - 2, 0.5), peaks[rank][None, :], rmss[rank][None, :],
                   edge[chosen][None, :, :], body[chosen][None, :, :])
+        any_over = over.any(axis=0)
+        if any_over.any() and height > 2 * mark:
+            image[:mark, any_over] = red
+            image[height - mark:, any_over] = red
     rgb = np.clip(image + 0.5, 0, 255).astype(np.uint32)
     return (0xFF000000 | (rgb[..., 0] << 16) | (rgb[..., 1] << 8) | rgb[..., 2]).astype(np.uint32)

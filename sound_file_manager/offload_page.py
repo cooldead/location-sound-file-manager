@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from . import bwf, catalog, duplicates, offload, report, settings
 from .catalog import Recording
+from .organize import MARKER_FILES
 from .dialogs import RewriteDialog, show_report
 from .file_model import COL, COLUMNS, EFFECTIVE_ROLE, REC_ROLE, RecordingsModel, RecordingsProxy
 from .branding_dialog import load_branding
@@ -66,9 +67,25 @@ class Planner(QThread):
 
     def run(self):
         try:
-            self.done.emit(offload.plan_copy(*self.args), self.generation)
+            plan = offload.plan_copy(*self.args)
         except OSError:
             self.done.emit([], self.generation)
+            return
+        # A "conflict" is often the same recording: the NAS copy's metadata
+        # was written later (a few bytes longer or shorter) or only its date
+        # differs. The audio fingerprint tells; those count as on the NAS.
+        targets: dict[str, int] = {}
+        for item in plan:
+            targets[item.dst] = targets.get(item.dst, 0) + 1
+        for item in plan:
+            if item.status != "conflict" or targets[item.dst] > 1 or not catalog.is_audio_file(item.dst):
+                continue
+            try:
+                if duplicates.sample_hash(item.src) == duplicates.sample_hash(item.dst):
+                    item.status = "same audio"
+            except (OSError, bwf.WavError, AttributeError):
+                pass
+        self.done.emit(plan, self.generation)
 
 
 class CopyThread(QThread):
@@ -814,8 +831,8 @@ class OffloadPage(QWidget):
             item = by_src.get(rec.path)
             if item is None:
                 continue
-            status[rec.path] = {"new": "new", "same": "on NAS", "conflict": "conflict: different file on NAS"}[
-                item.status]
+            status[rec.path] = {"new": "new", "same": "on NAS", "same audio": "on NAS (same audio, metadata differs)",
+                                "conflict": "conflict: different file on NAS"}[item.status]
             if item.status == "new" and rec.path in self.in_library_paths:
                 status[rec.path] = "in library (elsewhere)"
         self.model.set_status(status)
@@ -830,7 +847,9 @@ class OffloadPage(QWidget):
                 day = child.data(0, DAY_ROLE)
                 items = [p for p in plan if offload.project_folder(p.src, self.card.path) == folder
                          and offload.day_folder(p.src, self.card.path) == day]
-                new = sum(1 for p in items if p.status == "new")
+                # Recorder marker files (.daily_folder…) don't make a day new: merges
+                # and empty-folder cleanup remove them from the NAS.
+                new = sum(1 for p in items if p.status == "new" and os.path.basename(p.src) not in MARKER_FILES)
                 conflicts = sum(1 for p in items if p.status == "conflict")
                 # Recordings the library already has in another folder: copying them
                 # again would make duplicates, so such days are not ticked.
@@ -840,7 +859,7 @@ class OffloadPage(QWidget):
                     text = f"{conflicts} conflict(s)"
                 elif elsewhere:
                     text = "in library (elsewhere)"
-                elif new == len(items):
+                elif new and new == sum(1 for p in items if os.path.basename(p.src) not in MARKER_FILES):
                     text = "new"
                 elif new:
                     text = f"{new} new"
@@ -969,7 +988,7 @@ class OffloadPage(QWidget):
         else:
             chosen = self.selected_plan()
             new = [i for i in chosen if i.status == "new"]
-            same = [i for i in chosen if i.status == "same"]
+            same = [i for i in chosen if i.on_nas]
             conflicts = [i for i in chosen if i.status == "conflict"]
             size = sum(i.size for i in new)
             text = f"<b>{len(new)}</b> file(s) to copy ({offload.human_size(size)})"
@@ -1019,7 +1038,7 @@ class OffloadPage(QWidget):
         def work(job):
             result = offload.copy_items(chosen, verify=verify, progress=job.progress.emit,
                                         cancelled=lambda: job.cancelled)
-            done = {i.src: i for i in result.copied + [i for i in result.skipped if i.status == "same"]}
+            done = {i.src: i for i in result.copied + [i for i in result.skipped if i.on_nas]}
             # Write the review changes into the NAS copies.
             written, need_rewrite, errors = [], [], []
             for src, changes in pending.items():
@@ -1137,7 +1156,7 @@ class OffloadPage(QWidget):
         self.model.clear_pending([i.src for i in written])
         library = self.destination()
         folders = []
-        for item in result.copied + [i for i in result.skipped if i.status == "same"]:
+        for item in result.copied + [i for i in result.skipped if i.on_nas]:
             relative = Path(item.dst).relative_to(library).parts
             folder = os.path.join(library, relative[0]) if len(relative) > 1 else library
             if folder not in folders:

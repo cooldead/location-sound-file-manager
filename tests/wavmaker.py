@@ -37,9 +37,17 @@ def chunk(cid: bytes, payload: bytes) -> bytes:
     return cid + struct.pack("<I", len(payload)) + payload + (b"\0" if len(payload) & 1 else b"")
 
 
-def fmt_chunk(channels=2, rate=48000, bits=24) -> bytes:
+FLOAT_GUID = struct.pack("<H", 3) + b"\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71"
+
+
+def fmt_chunk(channels=2, rate=48000, bits=24, tag=1, extensible=False) -> bytes:
     align = channels * bits // 8
-    return chunk(b"fmt ", struct.pack("<HHIIHH", 1, channels, rate, rate * align, align, bits))
+    if extensible:
+        guid = FLOAT_GUID if tag == 3 else struct.pack("<H", tag) + FLOAT_GUID[2:]
+        return chunk(b"fmt ", struct.pack("<HHIIHHHHI", 0xFFFE, channels, rate, rate * align, align, bits, 22, bits,
+                                          0) + guid)
+    return chunk(b"fmt ", struct.pack("<HHIIHH", 1 if tag == 1 else tag, channels, rate, rate * align, align, bits)
+                 + (struct.pack("<H", 0) if tag == 3 else b""))
 
 
 def bext_chunk(description: str, time_reference: int = 0, originator="TEST REC") -> bytes:
@@ -58,10 +66,13 @@ def audio(frames=4800, channels=2, bits=24, level=0x100000) -> bytes:
 
 def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO.wav",
              layout="sd", ixml_padding=400, frames=4800, time_reference=48000 * 3600, extra_tail=b"",
-             rf64=False, with_ixml=True, with_bext=True, level=0x100000, levels=None) -> bytes:
+             rf64=False, with_ixml=True, with_bext=True, level=0x100000, levels=None,
+             float_samples=None, float_bits=32, extensible=False) -> bytes:
     """Write a WAV and return its audio data bytes.
 
     layout "sd": JUNK bext iXML fmt data (Sound Devices); "zoom": bext iXML fmt PAD data.
+    float_samples: a numpy array (frames, channels) written as IEEE float
+    (float_bits 32 or 64), with a WAVE_FORMAT_EXTENSIBLE fmt if extensible.
     """
     description = (f"sSPEED=023.976-ND\r\nsTAKE={take}\r\nsSCENE={scene}\r\nsFILENAME={filename}\r\n"
                    f"sTAPE=25Y10M27\r\nsCIRCLED=FALSE\r\nsNOTE=\r\n")
@@ -73,13 +84,18 @@ def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO
     ixml += b" " * ixml_padding
     # levels: one constant level per channel (lets tests build files whose
     # channels are, or are not, contained in another file).
-    if levels:
+    if float_samples is not None:
+        import numpy as np
+        samples = np.asarray(float_samples, "<f4" if float_bits == 32 else "<f8")
+        data = samples.tobytes()
+        frames = len(samples)
+    elif levels:
         width = 3
         frame = b"".join(int(lv).to_bytes(4, "little", signed=True)[:width] for lv in levels)
         data = frame * frames
     else:
         data = audio(frames, level=level)
-    channels = len(levels) if levels else 2
+    channels = float_samples.shape[1] if float_samples is not None else (len(levels) if levels else 2)
     chunks = []
     if rf64:
         chunks.append(chunk(b"ds64", struct.pack("<QQQI", 0, len(data), frames, 0)))
@@ -89,7 +105,11 @@ def make_wav(path, *, project="Proj", scene="10", take="03", filename="10T03_ISO
         chunks.append(bext_chunk(description, time_reference))
     if with_ixml:
         chunks.append(chunk(b"iXML", ixml))
-    chunks.append(fmt_chunk(channels=channels))
+    if float_samples is not None:
+        chunks.append(fmt_chunk(channels=channels, bits=float_bits, tag=3, extensible=extensible))
+        chunks.append(chunk(b"fact", struct.pack("<I", frames)))
+    else:
+        chunks.append(fmt_chunk(channels=channels))
     if layout == "zoom":
         chunks.append(chunk(b"PAD ", b"\0" * 200))
     if rf64:

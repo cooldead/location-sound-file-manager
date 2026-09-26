@@ -204,12 +204,19 @@ class CopyItem:
     src: str
     dst: str
     size: int
-    status: str = "new"  # "new", "same" (already there, identical size+date), "conflict"
+    # "new", "same" (already there, identical size+date), "same audio" (already
+    # there with the same audio, only its metadata bytes or date differ), "conflict"
+    status: str = "new"
     rename_from: str = ""  # pending rename: the card name this file had
 
     @property
     def needs_copy(self) -> bool:
         return self.status == "new"
+
+    @property
+    def on_nas(self) -> bool:
+        """The recording is already at its destination (not copied again)."""
+        return self.status in ("same", "same audio")
 
 
 def destination_for(src: str, card_root: str, library: str, folder_names: dict[str, str],

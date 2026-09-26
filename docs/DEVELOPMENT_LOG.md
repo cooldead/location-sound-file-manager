@@ -222,3 +222,11 @@
 
 **Verified:** 125 unit tests; smoke test with screenshots of the full and zoomed views, marker add/jump/move.
 
+## 2026-09-27: tested with a real card, 32-bit float
+
+**Real card (833, read-only mount):** 141 recordings read in 3 s; card folders matched the library by name (no project dialog, correctly). Findings, fixed:
+- 10 files showed "conflict: different file on NAS" though they were the same recordings (audio identical; the NAS copies were 12 bytes shorter/longer, one only a different date). Conflicts are now fingerprinted: same audio = "on NAS (same audio, metadata differs)".
+- A fully backed-up day was ticked because its `.daily_folder` marker was missing on the NAS (removed by empty-folder cleanup). Marker files no longer count as new.
+
+**32-bit float:** parsing and decoding existed; added over-0 dBFS marks on the waveform, a NaN/infinity guard, a float WAV writer for tests and `tests/test_float.py`. Checked on a real Deity PR-2 file (80 min mono, peaks at +0.7 dBFS).
+
