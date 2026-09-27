@@ -1,6 +1,6 @@
 # Location Sound File Manager
 
-A desktop app for Linux and macOS for browsing a library of production sound recordings: WAV/BWF files from field recorders such as the Sound Devices 8-series and Zoom F-series. It reads the metadata the recorders embed, groups recordings by project, plays them with a per-channel waveform, and lets you rename, re-tag and reorganise them. Every change is previewed first and can be undone.
+A desktop app for Linux, macOS and Windows for browsing a library of production sound recordings: WAV/BWF files from field recorders such as the Sound Devices 8-series and Zoom F-series. It reads the metadata the recorders embed, groups recordings by project, plays them with a per-channel waveform, and lets you rename, re-tag and reorganise them. Every change is previewed first and can be undone.
 
 ## Download
 
@@ -11,7 +11,7 @@ A desktop app for Linux and macOS for browsing a library of production sound rec
 | **Linux**: from source | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). Or clone the repository. |
 | **macOS** (Apple silicon) | [v1.4.0 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-macos) | `Location-Sound-File-Manager-1.4.0-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
 
-The Linux and Mac releases are built separately from the shared source. Both platform downloads above include the v1.4.0 features. You can also build the Mac app from source ([macOS](#macos)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
+The Linux and Mac releases are built separately from the shared source. Both platform downloads above include the v1.4.0 features. You can also build the Mac app from source ([macOS](#macos)). There is no Windows release yet; build it from source ([Windows](#windows)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
 
 ## First run
 
@@ -144,6 +144,20 @@ macos/build_app.sh --install   # builds dist/Location Sound File Manager.app and
 The script makes a private `.venv` in the project folder; `./run.sh` uses it too, so you can also start the app from the folder, and `.venv/bin/python -m unittest` runs the tests. The first time the app reads a card or a network share, macOS asks for permission.
 
 Cards are found with `diskutil` (volumes on removable media such as SD slots and readers). Ejecting ejects the whole card. Shortcuts use ⌘ where Linux uses Ctrl. Settings, history and markers are kept in `~/Library/Application Support/location-sound-file-manager/`, and the scan cache in `~/Library/Caches/location-sound-file-manager/`.
+
+### Windows
+
+Needs Windows 10 or 11 (64-bit) and Python 3.11+ (from python.org, or `winget install Python.Python.3.13`). To build a self-contained app (Python, Qt and numpy inside, about 170 MB, a 70 MB zip), in PowerShell:
+
+```powershell
+git clone https://github.com/cooldead/location-sound-file-manager
+cd location-sound-file-manager
+powershell -ExecutionPolicy Bypass -File windows\build_app.ps1 -Install
+```
+
+This builds `dist\Location Sound File Manager\Location Sound File Manager.exe` and a zip next to it. `-Install` also copies it to `%LOCALAPPDATA%\Programs\` and adds a Start menu shortcut. The script makes a private `.venv` in the project folder; `run.bat [library]` uses it too, so you can also start the app from the folder, and `.venv\Scripts\python -m unittest` runs the tests.
+
+A network library can be a mapped drive (`Z:\Sound`) or a UNC path (`\\nas\share\Sound`). Cards are the drives Windows reports as removable (SD slots and readers, recorders in USB mode). Ejecting dismounts the card like *Safely Remove*. Settings, history and markers are kept in `%LOCALAPPDATA%\location-sound-file-manager\`, and the scan cache in `%LOCALAPPDATA%\cache\location-sound-file-manager\`. Names with `\ : * ? " < > |` can't be used on Windows, so renames refuse them.
 
 ## License
 

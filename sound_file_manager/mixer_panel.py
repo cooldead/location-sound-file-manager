@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import mixer
+from . import compat, mixer
 from .mixer import MixerState, format_db, format_pan, track_color
 
 METER_FLOOR = -60.0
@@ -630,7 +630,7 @@ class MixerPanel(QWidget):
         if not self.state.channels:
             return
         stem = os.path.splitext(self.file_name)[0] or "mix"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Automation", os.path.join(self.folder, f"{stem}.mix.json"),
+        path, _ = QFileDialog.getSaveFileName(self, "Save Automation", compat.join(self.folder, f"{stem}.mix.json"),
                                               "Mixer settings (*.mix.json *.json)")
         if not path:
             return

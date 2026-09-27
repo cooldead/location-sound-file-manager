@@ -4,11 +4,15 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from . import settings
+from . import compat, settings
 from .main_window import APP_NAME, MainWindow
 
 
 def main() -> int:
+    if compat.WINDOWS:
+        # Our own taskbar button and icon, not python.exe's.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("io.github.cooldead.location-sound-file-manager")
     app = QApplication(sys.argv)
     app.setApplicationName("location-sound-file-manager")
     app.setApplicationDisplayName(APP_NAME)
@@ -19,7 +23,7 @@ def main() -> int:
     args = [a for a in app.arguments()[1:] if not a.startswith("-")]
     if args:
         path = Path(args[0]).expanduser().resolve()
-        library = str(path if path.is_dir() else path.parent)
+        library = compat.fwd(path if path.is_dir() else path.parent)
 
     settings.migrate_old_folders()
     window = MainWindow(library)

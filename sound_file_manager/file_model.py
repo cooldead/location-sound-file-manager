@@ -10,6 +10,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyMod
 from PySide6.QtGui import QBrush, QColor, QFont, QPalette, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication
 
+from . import compat
 from .catalog import Recording, day_of
 from .timecode import format_duration
 
@@ -58,7 +59,7 @@ class RecordingsModel(QAbstractTableModel):
             return rec
         values = {k: v for k, v in changes.items() if k != "name"}
         if "name" in changes:
-            values["path"] = os.path.join(rec.folder, changes["name"])
+            values["path"] = compat.join(rec.folder, changes["name"])
         return dataclasses.replace(rec, **values)
 
     def set_pending(self, rec: Recording, key: str, value) -> None:
@@ -243,7 +244,7 @@ class RecordingsModel(QAbstractTableModel):
     def _folder(self, rec: Recording) -> str:
         if self.root:
             try:
-                relative = os.path.relpath(rec.folder, self.root)
+                relative = compat.relpath(rec.folder, self.root)
                 return "" if relative == "." else relative
             except ValueError:
                 pass

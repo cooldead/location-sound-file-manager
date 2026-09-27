@@ -4,7 +4,7 @@ import unittest
 
 from PySide6.QtCore import QSettings
 
-from sound_file_manager import report
+from sound_file_manager import compat, report
 from sound_file_manager.catalog import Recording
 from sound_file_manager.report_dialog import ReportDialog, ReportGroup
 
@@ -22,7 +22,7 @@ def rec(project, name):
 class ReportDialogTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.qsettings = QSettings(os.path.join(self._tmp.name, "s.ini"), QSettings.Format.IniFormat)
+        self.qsettings = QSettings(compat.join(self._tmp.name, "s.ini"), QSettings.Format.IniFormat)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -74,9 +74,9 @@ class ReportDialogTest(unittest.TestCase):
 class SetupDialogTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.qsettings = QSettings(os.path.join(self._tmp.name, "s.ini"), QSettings.Format.IniFormat)
-        self.out = os.path.join(self._tmp.name, "out")
-        self.lib = os.path.join(self._tmp.name, "lib")
+        self.qsettings = QSettings(compat.join(self._tmp.name, "s.ini"), QSettings.Format.IniFormat)
+        self.out = compat.join(self._tmp.name, "out")
+        self.lib = compat.join(self._tmp.name, "lib")
         os.mkdir(self.out)
         os.mkdir(self.lib)
 
@@ -115,7 +115,7 @@ class SetupDialogTest(unittest.TestCase):
         from unittest import mock
         from PySide6.QtWidgets import QMessageBox
         dialog = dispose(self, SetupDialog(self.qsettings))
-        dialog.output.setText(os.path.join(self._tmp.name, "nope"))
+        dialog.output.setText(compat.join(self._tmp.name, "nope"))
         with mock.patch.object(QMessageBox, "warning") as warning:
             dialog.accept()
         warning.assert_called_once()

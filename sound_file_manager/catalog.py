@@ -16,7 +16,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import bwf
+from . import bwf, compat
 from . import timecode as tc
 
 AUDIO_EXTENSIONS = {".wav", ".bwf"}
@@ -206,12 +206,12 @@ def project_folder_of(recs: Iterable[Recording], root: str, containers: Iterable
                     chosen = parts[:i + 1]
                     break
         if chosen:
-            folder = os.path.join(root, *chosen)
+            folder = compat.join(root, *chosen)
             votes[folder] = votes.get(folder, 0) + 1
     if votes:
         return max(votes, key=lambda f: (votes[f], -len(f)))
     folders = [os.path.dirname(r.path) for r in recs]
-    return os.path.commonpath(folders) if folders else ""
+    return compat.fwd(os.path.commonpath(folders)) if folders else ""
 
 
 def day_of(rec: Recording) -> str:
@@ -344,6 +344,7 @@ def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False, *,
     """Yield (path, stat) for every audio file below root, skipping hidden
     folders. Folders are listed and files checked in parallel, so the order
     is not fixed. Folders that could not be listed are added to `failed`."""
+    root = compat.fwd(root)
     if workers <= 1:
         yield from _walk_audio_serial(root, cancelled, failed)
         return
@@ -351,7 +352,7 @@ def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False, *,
 
     def stat_entry(entry):
         try:
-            return entry.path, entry.stat()
+            return compat.fwd(entry.path), entry.stat()
         except OSError:
             return None  # gone since it was listed
 
@@ -366,7 +367,7 @@ def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False, *,
             try:
                 if entry.is_dir(follow_symlinks=False):
                     if not entry.name.startswith(".") and entry.name != REMOVED_FOLDER:
-                        subfolders.append(entry.path)
+                        subfolders.append(compat.fwd(entry.path))
                 elif entry.is_file() and is_audio_file(entry.name):
                     audio.append(entry)
             except OSError:
@@ -408,9 +409,9 @@ def _walk_audio_serial(root: str, cancelled: Callable[[], bool], failed: list[st
             try:
                 if entry.is_dir(follow_symlinks=False):
                     if not entry.name.startswith(".") and entry.name != REMOVED_FOLDER:
-                        subfolders.append(entry.path)
+                        subfolders.append(compat.fwd(entry.path))
                 elif entry.is_file() and is_audio_file(entry.name):
-                    yield entry.path, entry.stat()
+                    yield compat.fwd(entry.path), entry.stat()
             except OSError:
                 continue
         stack.extend(reversed(subfolders))

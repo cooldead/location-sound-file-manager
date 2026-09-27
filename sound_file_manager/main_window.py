@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, duplicates, offload, settings
+from . import bwf, catalog, compat, duplicates, offload, settings
 from .offload import human_size
 from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
@@ -392,7 +392,7 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Choose the folder of recordings", start)
         if not folder:
             return False
-        self.root = os.path.normpath(folder)
+        self.root = compat.normpath(folder)
         settings.put(self.qsettings, "library_folder", self.root)
         self.load_library()
         return True
@@ -1143,7 +1143,7 @@ class MainWindow(QMainWindow):
                    remove_empty: bool = False):
         """The single entry point for renames and moves."""
         ops = [RenameOp(Path(rec.path), dst) for rec, dst in pairs]
-        released = self._release_player({str(op.src) for op in ops})
+        released = self._release_player({compat.fwd(op.src) for op in ops})
         root = self.root
 
         def work(job):
@@ -1170,14 +1170,14 @@ class MainWindow(QMainWindow):
                                 if isinstance(error, RenameError) else f"Failed: {error}")
             return
         applied, created, removed_dirs, removed_markers, embed_errors = result
-        mapping = {str(op.src): str(op.dst) for op in applied}
+        mapping = {compat.fwd(op.src): compat.fwd(op.dst) for op in applied}
         self._refresh_moved(mapping, reread=embed)
         self._restore_player(released, mapping)
         if applied:
             self._push_undo({"kind": "rename", "label": label, "applied": applied, "created": created,
                              "removed_dirs": removed_dirs, "removed_markers": removed_markers, "embed": embed})
             self._log("rename" if not remove_empty else "move",
-                      files=[[str(op.src), str(op.dst)] for op in applied], embedded_name=embed)
+                      files=[[compat.fwd(op.src), compat.fwd(op.dst)] for op in applied], embedded_name=embed)
         verb = "Moved" if remove_empty else "Renamed"
         summary = f"{verb} {len(applied):,} file(s)."
         if removed_dirs:
@@ -1189,7 +1189,7 @@ class MainWindow(QMainWindow):
 
     def _undo_renames(self, entry):
         reverse = undo_ops(entry["applied"])
-        released = self._release_player({str(op.src) for op in reverse})
+        released = self._release_player({compat.fwd(op.src) for op in reverse})
 
         def work(job):
             # Folders removed as "left empty" come back (apply_renames creates
@@ -1218,10 +1218,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"Could not undo:\n{error}")
             return
         applied, errors = result
-        mapping = {str(op.src): str(op.dst) for op in applied}
+        mapping = {compat.fwd(op.src): compat.fwd(op.dst) for op in applied}
         self._refresh_moved(mapping, reread=entry["embed"])
         self._restore_player(released, mapping)
-        self._log("undo " + entry["label"], files=[[str(op.src), str(op.dst)] for op in applied])
+        self._log("undo " + entry["label"], files=[[compat.fwd(op.src), compat.fwd(op.dst)] for op in applied])
         if errors:
             show_report(self, "Undo", "Files are back, but some names inside them could not be restored:", errors)
         else:
@@ -1456,8 +1456,8 @@ class MainWindow(QMainWindow):
         undo parts, a summary and what was left alone (no dialogs here)."""
         skipped, retagged = out["skipped"], out["retagged"]
         applied = out["applied"]
-        gone = {str(op.src) for op in applied if catalog.REMOVED_FOLDER in Path(op.dst).parts} | set(out["deleted"])
-        moved = {str(op.src): str(op.dst) for op in applied if str(op.src) not in gone}
+        gone = {compat.fwd(op.src) for op in applied if catalog.REMOVED_FOLDER in Path(op.dst).parts} | set(out["deleted"])
+        moved = {compat.fwd(op.src): compat.fwd(op.dst) for op in applied if compat.fwd(op.src) not in gone}
         self._drop_from_library(gone)
         self._refresh_moved(moved, reread=False)
         self._reread([p for p, _ in retagged])
@@ -1604,7 +1604,7 @@ class MainWindow(QMainWindow):
         """Permanently delete files (from Review & Delete; the user confirmed)."""
         if self.player.rec is not None and self.player.rec.path in paths:
             self.player.load(None)
-        holding = os.path.join(self.root, catalog.REMOVED_FOLDER)
+        holding = compat.join(self.root, catalog.REMOVED_FOLDER)
 
         def work(job):
             deleted, failed = [], []
@@ -1647,7 +1647,7 @@ class MainWindow(QMainWindow):
         def find(job):
             return find_empty_folders(root, cancelled=lambda: job.cancelled,
                                       progress=lambda n, path: job.report(0, 0, f"Looked in {n:,} folders… "
-                                                                                f"{os.path.relpath(path, root)}"))
+                                                                                f"{compat.relpath(path, root)}"))
 
         folders, error = run_job(parent, "Looking for empty folders", find)
         if error is not None:
@@ -1663,9 +1663,9 @@ class MainWindow(QMainWindow):
         box.setInformativeText("They hold no audio or other files, only the recorders' marker files "
                                "(.take_folder, .daily_folder, .DS_Store), also in any subfolders. Each one is "
                                "checked again just before it is deleted. You can undo this.\n\n" +
-                               "\n".join(os.path.relpath(f, root) for f in folders[:12]) +
+                               "\n".join(compat.relpath(f, root) for f in folders[:12]) +
                                (f"\n… and {len(folders) - 12:,} more (see Show Details)" if len(folders) > 12 else ""))
-        box.setDetailedText("\n".join(os.path.relpath(f, root) for f in folders))
+        box.setDetailedText("\n".join(compat.relpath(f, root) for f in folders))
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         box.button(QMessageBox.StandardButton.Yes).setText("Delete Empty Folders")
         if box.exec() != QMessageBox.StandardButton.Yes:
@@ -1674,12 +1674,12 @@ class MainWindow(QMainWindow):
         def remove(job):
             dirs, markers, kept = [], [], []
             for n, folder in enumerate(folders):
-                job.report(n, len(folders), f"Deleting {os.path.relpath(folder, root)}…")
+                job.report(n, len(folders), f"Deleting {compat.relpath(folder, root)}…")
                 d, m = remove_tree_if_empty(folder)
                 dirs += d
                 markers += m
                 if folder not in d:
-                    kept.append(f"{os.path.relpath(folder, root)}: no longer empty, or could not be deleted")
+                    kept.append(f"{compat.relpath(folder, root)}: no longer empty, or could not be deleted")
             # Parents emptied by this go as well.
             more_dirs, more_markers = remove_left_empty({f.parent for f in folders}, root)
             return dirs + more_dirs, markers + more_markers, kept
@@ -1692,7 +1692,7 @@ class MainWindow(QMainWindow):
         if dirs:
             self._push_undo({"kind": "rename", "label": f"deleting {len(dirs):,} empty folders", "applied": [],
                              "created": [], "removed_dirs": dirs, "removed_markers": markers, "embed": False})
-            self._log("delete empty folders", folders=[str(d) for d in dirs])
+            self._log("delete empty folders", folders=[compat.fwd(d) for d in dirs])
         summary = f"Deleted {len(dirs):,} empty folder{'s' if len(dirs) != 1 else ''}."
         if kept:
             show_report(parent, "Delete Empty Folders", summary + " Some were left:", kept)
@@ -1710,12 +1710,12 @@ class MainWindow(QMainWindow):
             return
         released = self._release_player({src for src, _ in pairs})
 
-        holding = os.path.join(self.root, catalog.REMOVED_FOLDER)
+        holding = compat.join(self.root, catalog.REMOVED_FOLDER)
 
         def work(job):
             created: list[Path] = []
             applied = apply_renames(ops, created, progress=lambda d, t: job.report(d, t))
-            _tidy_holding([str(op.src) for op in applied], holding)
+            _tidy_holding([compat.fwd(op.src) for op in applied], holding)
             return applied, created
 
         result, error = run_job(self, "Putting files back", work, cancellable=False)
@@ -1726,8 +1726,8 @@ class MainWindow(QMainWindow):
         applied, created = result
         self._push_undo({"kind": "rename", "label": f"putting back {len(applied)} file(s)", "applied": applied,
                          "created": created, "removed_dirs": [], "removed_markers": [], "embed": False})
-        self._add_to_library([str(op.dst) for op in applied])
-        self._log("put back", files=[[str(op.src), str(op.dst)] for op in applied])
+        self._add_to_library([compat.fwd(op.dst) for op in applied])
+        self._log("put back", files=[[compat.fwd(op.src), compat.fwd(op.dst)] for op in applied])
         summary = f"Put {len(applied)} file(s) back."
         if blocked:
             show_report(self, "Put back", summary + " Some were left in the folder:", blocked)
@@ -1762,7 +1762,7 @@ class MainWindow(QMainWindow):
                          "parts": [{"kind": "rename", "label": "keep marked copy", "applied": applied,
                                     "created": created, "removed_dirs": [], "removed_markers": [],
                                     "embed": False}]})
-        self._log("keep marked copy", marked=marked, kept_moved_to=str(ops[0].dst), renamed_to=target)
+        self._log("keep marked copy", marked=marked, kept_moved_to=compat.fwd(ops[0].dst), renamed_to=target)
         self.statusBar().showMessage(f"Kept {os.path.basename(marked)} as {os.path.basename(target)}; the other "
                                      f"copy is in “{catalog.REMOVED_FOLDER}”.", 8000)
         if self._removed_window is not None:
@@ -1773,7 +1773,7 @@ class MainWindow(QMainWindow):
         def touches(entry) -> bool:
             parts = entry["parts"] if entry["kind"] == "compound" else [entry]
             for part in parts:
-                if part["kind"] == "rename" and any(str(op.dst) in deleted for op in part["applied"]):
+                if part["kind"] == "rename" and any(compat.fwd(op.dst) in deleted for op in part["applied"]):
                     return True
                 if part["kind"] == "copies" and any(p in deleted for p in part["paths"]):
                     return True

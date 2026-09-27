@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import library_index, organize, settings, waveform
+from . import compat, library_index, organize, settings, waveform
 from .catalog import Recording
 from .renamer import validate_name
 
@@ -82,7 +82,7 @@ class RenameDialog(QDialog):
     def _check(self):
         name = self.new_name()
         message = validate_name(name) if self.edit.text().strip() else "name is empty"
-        if not message and name != self.rec.name and os.path.lexists(os.path.join(self.rec.folder, name)) \
+        if not message and name != self.rec.name and os.path.lexists(compat.join(self.rec.folder, name)) \
                 and name.casefold() != self.rec.name.casefold():
             message = f"'{name}' already exists"
         self.error.setText(message or "")
@@ -530,7 +530,7 @@ class SettingsDialog(QDialog):
     def _index_status(self) -> str:
         """What the library folder holds now (one or two requests to the share)."""
         root = self.folder.text().strip()
-        path = os.path.join(library_index.index_folder(root), library_index.METADATA_FILE)
+        path = compat.join(library_index.index_folder(root), library_index.METADATA_FILE)
         try:
             stat = os.stat(path)
         except OSError:

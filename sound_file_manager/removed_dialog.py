@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QSplitter, QStyle, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import duplicates
+from . import compat, duplicates
 from .catalog import REMOVED_FOLDER, Recording
 from .offload import human_size
 
@@ -142,7 +142,7 @@ class RemovedDialog(QDialog):
             top = QTreeWidgetItem([project or "(no project)", "", human_size(sum(i[3] for i in group))])
             top.setFont(0, bold)
             for path, _, original, size in group:
-                child = QTreeWidgetItem([os.path.basename(path), os.path.relpath(os.path.dirname(original), root),
+                child = QTreeWidgetItem([os.path.basename(path), compat.relpath(os.path.dirname(original), root),
                                          human_size(size)])
                 child.setData(0, PATH_ROLE, path)
                 child.setData(0, ORIGINAL_ROLE, original)
@@ -153,7 +153,7 @@ class RemovedDialog(QDialog):
         total = sum(i[3] for i in items)
         self.removed_items = items
         self.removed_summary.setText(
-            f"<b>{len(items):,}</b> file(s), {human_size(total)}, in <b>{os.path.join(root, REMOVED_FOLDER)}</b>, "
+            f"<b>{len(items):,}</b> file(s), {human_size(total)}, in <b>{compat.join(root, REMOVED_FOLDER)}</b>, "
             "sorted by the project they belonged to." if items else f"“{REMOVED_FOLDER}” is empty.")
 
     def _selected_removed(self) -> list[QTreeWidgetItem]:
@@ -166,7 +166,7 @@ class RemovedDialog(QDialog):
         return list({id(i): i for i in chosen}.values())
 
     def _open_removed_folder(self):
-        folder = os.path.join(self.root_getter(), REMOVED_FOLDER)
+        folder = compat.join(self.root_getter(), REMOVED_FOLDER)
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder if os.path.isdir(folder) else self.root_getter()))
 
     def _restore(self):
@@ -325,8 +325,8 @@ class RemovedDialog(QDialog):
             root = self.root_getter()
             for label, a, b, differs in duplicates.compare_rows(rec, match):
                 if label == "Folder" and root:
-                    a = os.path.relpath(a, root) if a else a
-                    b = os.path.relpath(b, root) if b else b
+                    a = compat.relpath(a, root) if a else a
+                    b = compat.relpath(b, root) if b else b
                 row = QTreeWidgetItem([label, a, b])
                 row.setToolTip(1, a)
                 row.setToolTip(2, b)
@@ -388,7 +388,7 @@ class RemovedDialog(QDialog):
         if pair is None or pair[1] is None:
             return
         rec, match, _ = pair
-        target = os.path.join(match.folder, match.name)
+        target = compat.join(match.folder, match.name)
         if QMessageBox.question(self, "Keep the marked copy", f"Move “{match.name}” into “{REMOVED_FOLDER}” and "
                                 f"rename “{rec.name}” to “{match.name}” in its place?\n\nThis can be undone.") \
                 == QMessageBox.StandardButton.Yes:

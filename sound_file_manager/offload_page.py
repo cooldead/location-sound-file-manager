@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, duplicates, offload, report, settings
+from . import bwf, catalog, compat, duplicates, offload, report, settings
 from .catalog import Recording
 from .organize import MARKER_FILES
 from .dialogs import RewriteDialog, show_report
@@ -188,7 +188,7 @@ class ExistingProjectsDialog(QDialog):
         self.resize(640, min(160 + 150 * len(rows), 700))
 
     def relative(self, folder: str) -> str:
-        return os.path.relpath(folder, self.destination)
+        return compat.relpath(folder, self.destination)
 
     def choices(self) -> dict[str, tuple[str, str]]:
         """Card folder -> (action, library folder below the destination for a merge)."""
@@ -577,14 +577,14 @@ class OffloadPage(QWidget):
             recs, lambda r: offload.project_folder(r.path, card_root), library_recs, library,
             settings.get(self.qsettings, "container_folders"))
         names = self.folder_names()
-        below = os.path.normpath(destination) + "/"
+        below = compat.normpath(destination) + "/"
         rows = []
         for folder, candidates in sorted(matches.items(), key=lambda kv: kv[0].casefold()):
             if folder in (offload.ROOT_FILES, offload.FALSE_TAKES) or (only is not None and folder != only):
                 continue
-            usable = [m for m in candidates if (os.path.normpath(m.library_folder) + "/").startswith(below)]
-            target = os.path.normpath(os.path.join(destination, names.get(folder, folder)))
-            if not usable or (only is None and any(os.path.normpath(m.library_folder) == target for m in usable)):
+            usable = [m for m in candidates if (compat.normpath(m.library_folder) + "/").startswith(below)]
+            target = compat.normpath(compat.join(destination, names.get(folder, folder)))
+            if not usable or (only is None and any(compat.normpath(m.library_folder) == target for m in usable)):
                 continue  # the copy already goes into the project's folder
             rows.append((folder, usable))
         if not rows:
@@ -727,7 +727,7 @@ class OffloadPage(QWidget):
             return True
         # Files directly in a project folder (recorder CSV reports, markers) go
         # along when any day of that project is copied.
-        return day == "" and any(f == folder for f, _ in days) and os.path.dirname(path) == os.path.join(
+        return day == "" and any(f == folder for f, _ in days) and os.path.dirname(path) == compat.join(
             self.card.path, folder)
 
     def _apply_scope(self):
@@ -762,7 +762,7 @@ class OffloadPage(QWidget):
             self.dest_box.addItem(f"Library folder — {library}", "")
             self.dest_box.setItemData(0, library, Qt.ItemDataRole.ToolTipRole)
         for folder in recent[:8]:
-            if os.path.normpath(folder) != os.path.normpath(library or ""):
+            if compat.normpath(folder) != compat.normpath(library or ""):
                 self.dest_box.addItem(folder, folder)
                 self.dest_box.setItemData(self.dest_box.count() - 1, folder, Qt.ItemDataRole.ToolTipRole)
         # The most recently used destination is the default.
@@ -784,8 +784,8 @@ class OffloadPage(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Copy into folder", self.destination() or "/mnt")
         if not folder:
             return
-        folder = os.path.normpath(folder)
-        if os.path.normpath(self.library() or "") == folder:
+        folder = compat.normpath(folder)
+        if compat.normpath(self.library() or "") == folder:
             folder = ""
         self._remember_destination(folder)
         self._fill_destinations()
@@ -799,7 +799,7 @@ class OffloadPage(QWidget):
 
     def in_library(self, folder: str) -> bool:
         library = self.library()
-        return bool(library) and (os.path.normpath(folder) + "/").startswith(os.path.normpath(library) + "/")
+        return bool(library) and (compat.normpath(folder) + "/").startswith(compat.normpath(library) + "/")
 
     # ------------------------------------------------------------ plan
 
@@ -873,7 +873,7 @@ class OffloadPage(QWidget):
                               and not elsewhere)
                     child.setCheckState(0, Qt.CheckState.Checked if wanted else Qt.CheckState.Unchecked)
             nas = item.text(3).strip()
-            target = os.path.join(self.destination(), nas) if nas else self.destination()
+            target = compat.join(self.destination(), nas) if nas else self.destination()
             exists = bool(nas) and os.path.isdir(target)
             item.setText(2, "existing folder" if exists else "new folder")
             item.setToolTip(2, f"{target} {'already exists; files are added to it' if exists else 'will be created'}")
@@ -933,7 +933,7 @@ class OffloadPage(QWidget):
         for folder in sorted(by_folder, key=str.casefold):
             nas = names.get(folder, folder)
             title = folder if nas in ("", folder) else f"{folder}  →  {nas}"
-            groups.append(ReportGroup(title, by_folder[folder], os.path.join(self.destination(), nas),
+            groups.append(ReportGroup(title, by_folder[folder], compat.join(self.destination(), nas),
                                       self.report_infos.get(folder), key=folder,
                                       project=nas or folder))
         return groups
@@ -1078,10 +1078,10 @@ class OffloadPage(QWidget):
                         for key, value in report.detected_fields(group).items():
                             if group_info.fields.get(key, "") in ("", project_wide.get(key, "")):
                                 group_info.fields[key] = value
-                    target = os.path.join(library, names.get(folder, folder), day)
+                    target = compat.join(library, names.get(folder, folder), day)
                     if folder == offload.ROOT_FILES:
-                        target = os.path.join(library, names.get(folder, ""), day)
-                    base = _unique(os.path.join(target, report.default_basename(group_info, group)))
+                        target = compat.join(library, names.get(folder, ""), day)
+                    base = _unique(compat.join(target, report.default_basename(group_info, group)))
                     try:
                         report.write_pdf(base + ".pdf", group_info, group)
                         report.write_csv(base + ".csv", group_info, group)
@@ -1158,7 +1158,7 @@ class OffloadPage(QWidget):
         folders = []
         for item in result.copied + [i for i in result.skipped if i.on_nas]:
             relative = Path(item.dst).relative_to(library).parts
-            folder = os.path.join(library, relative[0]) if len(relative) > 1 else library
+            folder = compat.join(library, relative[0]) if len(relative) > 1 else library
             if folder not in folders:
                 folders.append(folder)
         self.last_folders = folders

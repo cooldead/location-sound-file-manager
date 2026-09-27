@@ -5,8 +5,9 @@ import shutil
 import tempfile
 import unicodedata
 import unittest
+from unittest import mock
 
-from sound_file_manager import catalog, library_index, waveform
+from sound_file_manager import catalog, compat, library_index, waveform
 from sound_file_manager.library_index import LibraryIndex
 
 from .wavmaker import make_wav
@@ -15,17 +16,17 @@ from .wavmaker import make_wav
 class LibraryIndexTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.root = os.path.join(self.tmp, "lib")
-        os.makedirs(os.path.join(self.root, "Proj", "250101"))
+        self.root = compat.join(self.tmp, "lib")
+        os.makedirs(compat.join(self.root, "Proj", "250101"))
         for take in ("01", "02"):
-            make_wav(os.path.join(self.root, "Proj", "250101", f"10T{take}_ISO.wav"), take=take,
+            make_wav(compat.join(self.root, "Proj", "250101", f"10T{take}_ISO.wav"), take=take,
                      filename=f"10T{take}_ISO.wav")
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
     def scan(self, root, cache_name, index=None):
-        cache = catalog.Cache(os.path.join(self.tmp, cache_name))
+        cache = catalog.Cache(compat.join(self.tmp, cache_name))
         try:
             recs = []
             stats = catalog.scan(root, cache, on_batch=recs.extend, index=index)
@@ -39,11 +40,14 @@ class LibraryIndexTests(unittest.TestCase):
         self.assertEqual(stats.parsed, 2)
         self.assertTrue(index.changed)
         index.save()
-        self.assertTrue(os.path.isfile(os.path.join(self.root, ".sfm-index", "metadata.json.gz")))
+        self.assertTrue(os.path.isfile(compat.join(self.root, ".sfm-index", "metadata.json.gz")))
 
         # The same share mounted somewhere else, with an empty cache.
-        other = os.path.join(self.tmp, "mounted elsewhere")
-        os.symlink(self.root, other)
+        other = compat.join(self.tmp, "mounted elsewhere")
+        try:
+            os.symlink(self.root, other)
+        except OSError:  # Windows without Developer Mode: a copy with the same dates will do
+            shutil.copytree(self.root, other)
         index2 = LibraryIndex.load(other)
         stats2, recs2 = self.scan(other, "b.sqlite", index2)
         self.assertEqual((stats2.parsed, stats2.indexed), (0, 2))
@@ -56,7 +60,7 @@ class LibraryIndexTests(unittest.TestCase):
         self.scan(self.root, "a.sqlite", index)
         index.save()
         index2 = LibraryIndex.load(self.root)
-        cache = catalog.Cache(os.path.join(self.tmp, "b.sqlite"))
+        cache = catalog.Cache(compat.join(self.tmp, "b.sqlite"))
         try:
             stats = catalog.scan(self.root, cache, on_batch=lambda b: None, index=index2, read_index=False)
         finally:
@@ -68,7 +72,7 @@ class LibraryIndexTests(unittest.TestCase):
         index = LibraryIndex.load(self.root)
         self.scan(self.root, "a.sqlite", index)
         index.save()
-        path = os.path.join(self.root, "Proj", "250101", "10T01_ISO.wav")
+        path = compat.join(self.root, "Proj", "250101", "10T01_ISO.wav")
         make_wav(path, take="07", filename="10T01_ISO.wav")
         os.utime(path, (1_000_000, 1_000_000))
         index2 = LibraryIndex.load(self.root)
@@ -81,7 +85,7 @@ class LibraryIndexTests(unittest.TestCase):
         index = LibraryIndex.load(self.root)
         self.scan(self.root, "a.sqlite", index)
         index.save()
-        os.remove(os.path.join(self.root, "Proj", "250101", "10T02_ISO.wav"))
+        os.remove(compat.join(self.root, "Proj", "250101", "10T02_ISO.wav"))
         index2 = LibraryIndex.load(self.root)
         self.scan(self.root, "a.sqlite", index2)
         self.assertEqual(list(index2.entries), ["Proj/250101/10T01_ISO.wav"])
@@ -91,7 +95,7 @@ class LibraryIndexTests(unittest.TestCase):
         index = LibraryIndex.load(self.root)
         self.scan(self.root, "a.sqlite", index)
         index.save()
-        library_index.write_levels(self.root, os.path.join(self.root, "x.wav"), 1, 1.0, b"x")
+        library_index.write_levels(self.root, compat.join(self.root, "x.wav"), 1, 1.0, b"x")
         stats, _ = self.scan(self.root, "b.sqlite")
         self.assertEqual(stats.found, 2)
 
@@ -117,7 +121,7 @@ class LibraryIndexTests(unittest.TestCase):
         self.assertIsNone(library_index.relative_key("/lib", "/media/card/a.wav"))
 
     def test_waveform_levels(self):
-        path = os.path.join(self.root, "Proj", "250101", "10T01_ISO.wav")
+        path = compat.join(self.root, "Proj", "250101", "10T01_ISO.wav")
         levels = waveform.compute_peaks(path, 64)
         blob = waveform.to_bytes(levels)
         self.assertTrue(library_index.write_levels(self.root, path, 100, 5.0, blob))
@@ -126,7 +130,7 @@ class LibraryIndexTests(unittest.TestCase):
         self.assertIsNone(library_index.read_levels(self.root, path, 100, 6.0))
         self.assertTrue(library_index.has_waveforms(self.root))
         self.assertFalse(library_index.write_levels(self.root, "/elsewhere/a.wav", 1, 1.0, blob))
-        leftovers = [n for _, _, names in os.walk(os.path.join(self.root, ".sfm-index")) for n in names
+        leftovers = [n for _, _, names in os.walk(compat.join(self.root, ".sfm-index")) for n in names
                      if n.startswith(".tmp-")]
         self.assertEqual(leftovers, [])
 
@@ -142,19 +146,19 @@ if __name__ == "__main__":
 class WalkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.root = os.path.join(self.tmp, "lib")
+        self.root = compat.join(self.tmp, "lib")
         for project in ("A", "B", "C"):
             for day in ("250101", "250102"):
-                os.makedirs(os.path.join(self.root, project, day))
+                os.makedirs(compat.join(self.root, project, day))
                 for take in ("01", "02"):
-                    make_wav(os.path.join(self.root, project, day, f"1T{take}_ISO.wav"), take=take)
-        os.makedirs(os.path.join(self.root, ".hidden"))
-        make_wav(os.path.join(self.root, ".hidden", "x.wav"))
+                    make_wav(compat.join(self.root, project, day, f"1T{take}_ISO.wav"), take=take)
+        os.makedirs(compat.join(self.root, ".hidden"))
+        make_wav(compat.join(self.root, ".hidden", "x.wav"))
 
     def tearDown(self):
         for folder, dirs, _ in os.walk(self.tmp):
             for d in dirs:
-                os.chmod(os.path.join(folder, d), 0o755)
+                os.chmod(compat.join(folder, d), 0o755)
         shutil.rmtree(self.tmp)
 
     def test_parallel_walk_finds_what_the_serial_walk_finds(self):
@@ -164,13 +168,22 @@ class WalkTests(unittest.TestCase):
         self.assertEqual(parallel, serial)
 
     def test_an_unreadable_folder_does_not_forget_its_files(self):
-        cache = catalog.Cache(os.path.join(self.tmp, "c.sqlite"))
+        cache = catalog.Cache(compat.join(self.tmp, "c.sqlite"))
         try:
             catalog.scan(self.root, cache, on_batch=lambda b: None)
-            os.chmod(os.path.join(self.root, "B"), 0)  # like a folder the share failed to list
+            unreadable = compat.join(self.root, "B")
+            os.chmod(unreadable, 0)  # like a folder the share failed to list
+            real_scandir = os.scandir
+
+            def scandir(path):  # Windows ignores the mode bits of a folder
+                if compat.fwd(path) == unreadable:
+                    raise PermissionError(13, "Access is denied", path)
+                return real_scandir(path)
+
             index = LibraryIndex.load(self.root)
-            stats = catalog.scan(self.root, cache, on_batch=lambda b: None, index=index)
-            self.assertEqual(stats.unlisted, [os.path.join(self.root, "B")])
+            with mock.patch("os.scandir", scandir):
+                stats = catalog.scan(self.root, cache, on_batch=lambda b: None, index=index)
+            self.assertEqual(stats.unlisted, [compat.join(self.root, "B")])
             self.assertEqual((stats.found, stats.removed), (8, 0))
             self.assertEqual(len(cache.all_under(self.root)), 12)
             self.assertFalse(index.changed)  # not written from an incomplete walk

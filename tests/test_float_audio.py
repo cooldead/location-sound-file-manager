@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from sound_file_manager import bwf, catalog, duplicates, waveform
+from sound_file_manager import bwf, catalog, compat, duplicates, waveform
 from sound_file_manager.audio_engine import AudioEngine
 from sound_file_manager.mixer import MixerState
 from tests import qt_app
@@ -25,7 +25,7 @@ class FloatAudioTests(unittest.TestCase):
                         fmt += struct.pack('<HHI', 22, 32, 3)
                         fmt += struct.pack('<IHH8s', 3, 0, 0x10, b'\x80\x00\x00\xaa\x00\x38\x9b\x71')
                     body = b'WAVE' + chunk(b'fmt ', fmt) + chunk(b'fact', struct.pack('<I', 4)) + chunk(b'data', samples.tobytes())
-                    path = os.path.join(folder, 'float.wav')
+                    path = compat.join(folder, 'float.wav')
                     with open(path, 'wb') as f:
                         f.write(b'RIFF' + struct.pack('<I', len(body)) + body)
                     info = bwf.read_info(path)

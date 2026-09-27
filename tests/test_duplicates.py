@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sound_file_manager import bwf, catalog, duplicates as d
+from sound_file_manager import bwf, catalog, compat, duplicates as d
 
 from .wavmaker import make_wav
 
@@ -18,7 +18,7 @@ class DuplicatesTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def make(self, relative, **kwargs):
-        path = os.path.join(self.root, relative)
+        path = compat.join(self.root, relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         kwargs.setdefault("filename", os.path.basename(relative))
         make_wav(path, **kwargs)
@@ -33,7 +33,7 @@ class DuplicatesTest(unittest.TestCase):
         a = self.make("Harbor/day1/1T01_ISO.wav", project="Harbor")
         b = self.make("SD_1/Harbor/day1/1T01_ISO.wav", project="Harbor")  # a card dump copy
         self.make("SD_2/Harbor/day1/1T01_ISO.wav", project="Harbor")
-        bwf.update_metadata(os.path.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav"), {"note": "boom bumped"})
+        bwf.update_metadata(compat.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav"), {"note": "boom bumped"})
         # Same length and timecode, different audio (an _LR mix of the same take): not a duplicate.
         self.make("Harbor/day1/1T01_LR.wav", project="Harbor", level=0x200000)
         self.make("Harbor/day1/2T01_ISO.wav", project="Harbor", time_reference=48000 * 7200)
@@ -49,12 +49,12 @@ class DuplicatesTest(unittest.TestCase):
         self.assertTrue(group.copy_identical(
             next(r for r in group.recs if r.path.endswith("SD_2/Harbor/day1/1T01_ISO.wav"))))
         # It has a note the kept copy lacks: it is the version kept (in the kept copy's place).
-        self.assertEqual(group.replacement.path, os.path.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav"))
+        self.assertEqual(group.replacement.path, compat.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav"))
         self.assertEqual(group.check_level(next(r for r in group.recs if r.path == b)), "audio")
         self.assertTrue(d.files_identical(a, b))
-        self.assertFalse(d.files_identical(a, os.path.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav")))
-        self.assertTrue(d.audio_identical(a, os.path.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav")))
-        self.assertFalse(d.audio_identical(a, os.path.join(self.root, "Harbor/day1/1T01_LR.wav")))
+        self.assertFalse(d.files_identical(a, compat.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav")))
+        self.assertTrue(d.audio_identical(a, compat.join(self.root, "SD_2/Harbor/day1/1T01_ISO.wav")))
+        self.assertFalse(d.audio_identical(a, compat.join(self.root, "Harbor/day1/1T01_LR.wav")))
 
     def test_iso_and_lr_are_kept_together(self):
         # The take folder has both files; the flat copy in the day folder has only
@@ -65,7 +65,7 @@ class DuplicatesTest(unittest.TestCase):
         self.make("SD_1/Harbor/day1/1T01/1T01_LR.wav", project="Harbor", level=0x200000)
         groups = d.find_duplicate_files(self.recs(), d.Fingerprints(), self.root, self.containers)
         self.assertEqual(len(groups), 2)  # the _ISO and the _LR each have a duplicate; never each other
-        keepers = {os.path.relpath(g.keeper.path, self.root) for g in groups}
+        keepers = {compat.relpath(g.keeper.path, self.root) for g in groups}
         self.assertEqual(keepers, {"Harbor/day1/1T01/1T01_ISO.wav", "Harbor/day1/1T01/1T01_LR.wav"})
 
     def test_plain_file_with_other_notes_differs(self):
@@ -83,7 +83,7 @@ class DuplicatesTest(unittest.TestCase):
         self.make("SD_1/Harbor/d/101AT01_LR.wav", project="Harbor", time_reference=1, level=0x200000)
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints())
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints())
         # The _ISO with the note replaces the kept one (preferred); the _LR repeat is removed.
         self.assertEqual(sorted((a.kind, a.rec.name, a.level) for a in actions),
                          [("remove", "101AT01_LR.wav", "identical"), ("replace", "101AT01_ISO.wav", "audio")])
@@ -94,7 +94,7 @@ class DuplicatesTest(unittest.TestCase):
         bwf.update_metadata(noted, {"note": "plane at the end"})
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints(),
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints(),
                                        root=self.root, containers=self.containers)
         moved = next(a for a in actions if a.kind == "move")
         self.assertEqual(moved.rec.path, noted)  # the copy with the note is the one kept
@@ -108,11 +108,11 @@ class DuplicatesTest(unittest.TestCase):
         bwf.update_metadata(noted_wild, {"circled": True})
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints())
-        by = {os.path.relpath(a.rec.path, self.root): a for a in actions}
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints())
+        by = {compat.relpath(a.rec.path, self.root): a for a in actions}
         replace = by["SD_1/Harbor/d/102AT01_ISO.wav"]
         self.assertEqual((replace.kind, replace.level), ("replace", "audio"))
-        self.assertEqual(replace.dst, os.path.join(self.root, "Harbor/d/102AT01_ISO.wav"))
+        self.assertEqual(replace.dst, compat.join(self.root, "Harbor/d/102AT01_ISO.wav"))
         self.assertEqual(replace.other.path, replace.dst)
         self.assertEqual(by["SD_1/Harbor/d/wild.wav"].kind, "replace")  # a circle counts as a note too
         # Duplicate Files: the copy with the note is the replacement for the kept one.
@@ -127,7 +127,7 @@ class DuplicatesTest(unittest.TestCase):
         bwf.update_metadata(other, {"note": "two"})
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints())
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints())
         self.assertEqual([a.kind for a in actions], ["differs"])
 
     def test_version_with_more_tracks_wins(self):
@@ -141,8 +141,8 @@ class DuplicatesTest(unittest.TestCase):
         self.assertFalse(d.channels_contained(other, big))  # 0x777 is in no channel of the big file
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = {os.path.relpath(a.rec.path, self.root): a
-                   for a in d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints())}
+        actions = {compat.relpath(a.rec.path, self.root): a
+                   for a in d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints())}
         replace = actions["SD_2/Harbor/B-ROLL-T008.WAV"]
         self.assertEqual((replace.kind, replace.level, replace.other.path), ("replace", "subset", small))
         smaller = actions["SD_2/Harbor/B-ROLL-T009.WAV"]
@@ -154,7 +154,7 @@ class DuplicatesTest(unittest.TestCase):
         self.make("SD_1/Harbor/d/101AT01_LR.wav", project="Harbor", time_reference=2, level=0x200000)
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "Harbor"), d.Fingerprints())
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "Harbor"), d.Fingerprints())
         kinds = {a.rec.name: a.kind for a in actions}
         self.assertEqual(kinds, {"101AT01_ISO.wav": "skip", "101AT01_LR.wav": "skip"})  # the _LR stays with it
         self.assertIn("partner", next(a for a in actions if a.rec.name == "101AT01_LR.wav").reason)
@@ -164,7 +164,7 @@ class DuplicatesTest(unittest.TestCase):
         self.make("Harbor/d/5T01_ReviewForDeletion.wav", project="Harbor", time_reference=5)
         self.make("Other/9T01_ReviewForDeletion (2).wav", project="Harbor", time_reference=5)
         self.make("Stray/7T01_ReviewForDeletion.wav", project="Harbor", time_reference=77)
-        pairs = {os.path.relpath(r.path, self.root): (m and os.path.relpath(m.path, self.root), how)
+        pairs = {compat.relpath(r.path, self.root): (m and compat.relpath(m.path, self.root), how)
                  for r, m, how in d.pair_review_copies(self.recs())}
         self.assertEqual(pairs["Harbor/d/5T01_ReviewForDeletion.wav"], ("Harbor/d/5T01.wav", "same name"))
         self.assertEqual(pairs["Other/9T01_ReviewForDeletion (2).wav"], ("Harbor/d/5T01.wav", "same recording"))
@@ -175,7 +175,7 @@ class DuplicatesTest(unittest.TestCase):
     def test_fingerprint_cache(self):
         path = self.make("P/a.wav")
         rec = catalog.read_recording(path)
-        cache = catalog.Cache(os.path.join(self.root, "c.sqlite"))
+        cache = catalog.Cache(compat.join(self.root, "c.sqlite"))
         first = d.Fingerprints(cache)(rec)
         self.assertEqual(cache.get_hash(rec.path, rec.size, rec.mtime), first)
         self.assertEqual(d.Fingerprints(cache)(rec), first)
@@ -184,15 +184,15 @@ class DuplicatesTest(unittest.TestCase):
     def test_removed_folder_is_not_scanned(self):
         self.make(f"{catalog.REMOVED_FOLDER}/Harbor/a.wav")
         self.assertEqual(self.recs(), [])
-        self.assertEqual(d.removal_path(os.path.join(self.root, "SD_1/x/a.wav"), self.root, "Harbor"),
-                         os.path.join(self.root, catalog.REMOVED_FOLDER, "Harbor", "SD_1/x/a.wav"))
-        self.assertEqual(d.removal_path(os.path.join(self.root, "a.wav"), self.root, "A/B: C"),
-                         os.path.join(self.root, catalog.REMOVED_FOLDER, "A-B- C", "a.wav"))
-        self.assertEqual(d.removal_path(os.path.join(self.root, "a.wav"), self.root),
-                         os.path.join(self.root, catalog.REMOVED_FOLDER, "No Project", "a.wav"))
+        self.assertEqual(d.removal_path(compat.join(self.root, "SD_1/x/a.wav"), self.root, "Harbor"),
+                         compat.join(self.root, catalog.REMOVED_FOLDER, "Harbor", "SD_1/x/a.wav"))
+        self.assertEqual(d.removal_path(compat.join(self.root, "a.wav"), self.root, "A/B: C"),
+                         compat.join(self.root, catalog.REMOVED_FOLDER, "A-B- C", "a.wav"))
+        self.assertEqual(d.removal_path(compat.join(self.root, "a.wav"), self.root),
+                         compat.join(self.root, catalog.REMOVED_FOLDER, "No Project", "a.wav"))
 
     def test_review_names_and_removed_items(self):
-        folder = os.path.join(self.root, "Harbor")
+        folder = compat.join(self.root, "Harbor")
         os.makedirs(folder)
         taken = set()
         first = d.review_path("/x/1T01_ISO.wav", folder, taken)
@@ -202,7 +202,7 @@ class DuplicatesTest(unittest.TestCase):
                          "1T01_ISO_ReviewForDeletion (2).wav")
         removed = self.make(f"{catalog.REMOVED_FOLDER}/Harbor/SD_1/Harbor/day1/1T01.wav")
         items = d.removed_items(self.root)
-        self.assertEqual(items[0][:3], (removed, "Harbor", os.path.join(self.root, "SD_1/Harbor/day1/1T01.wav")))
+        self.assertEqual(items[0][:3], (removed, "Harbor", compat.join(self.root, "SD_1/Harbor/day1/1T01.wav")))
 
     def test_project_groups(self):
         self.make("SD_1/Night Shift/1T01.wav", project="NIGHT SHIFT")
@@ -225,7 +225,7 @@ class DuplicatesTest(unittest.TestCase):
         self.assertEqual(d.normalize("Pine Tree Bakery"), d.normalize("Pinetreebakery"))
 
     def test_merge_plan(self):
-        keep = os.path.join(self.root, "Harbor")
+        keep = compat.join(self.root, "Harbor")
         self.make("Harbor/day1/1T01.wav", project="Harbor", time_reference=1)
         self.make("SD_1/Harbor/day1/1T01.wav", project="Harbor", time_reference=1)  # identical -> remove
         self.make("SD_1/Harbor/day2/5T01.wav", project="Harbor", time_reference=5)  # only here -> move
@@ -236,10 +236,10 @@ class DuplicatesTest(unittest.TestCase):
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
         actions = d.plan_project_merge(recs, group, keep, d.Fingerprints())
-        by_file = {os.path.relpath(a.rec.path, self.root): a for a in actions}
+        by_file = {compat.relpath(a.rec.path, self.root): a for a in actions}
         self.assertEqual(by_file["SD_1/Harbor/day1/1T01.wav"].kind, "remove")
         self.assertEqual(by_file["SD_1/Harbor/day2/5T01.wav"].kind, "move")
-        self.assertEqual(by_file["SD_1/Harbor/day2/5T01.wav"].dst, os.path.join(keep, "day2/5T01.wav"))
+        self.assertEqual(by_file["SD_1/Harbor/day2/5T01.wav"].dst, compat.join(keep, "day2/5T01.wav"))
         self.assertEqual(by_file["SD_1/Harbor/day1/1T02.wav"].kind, "skip")
         self.assertNotIn("Harbor/day1/1T01.wav", by_file)  # already in the kept folder
         # It has a note the kept copy lacks: versions with notes are preferred.
@@ -251,17 +251,17 @@ class DuplicatesTest(unittest.TestCase):
         self.make("SD_2/Harbor/day2/5T01.wav", project="Harbor", time_reference=5)  # only here
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        new = os.path.join(self.root, d.suggested_folder_name(group))
-        self.assertEqual(new, os.path.join(self.root, "Harbor"))
+        new = compat.join(self.root, d.suggested_folder_name(group))
+        self.assertEqual(new, compat.join(self.root, "Harbor"))
         actions = d.plan_project_merge(recs, group, new, d.Fingerprints(), root=self.root, containers=self.containers)
-        kinds = sorted((a.kind, os.path.relpath(a.rec.path, self.root)) for a in actions)
+        kinds = sorted((a.kind, compat.relpath(a.rec.path, self.root)) for a in actions)
         self.assertEqual(kinds, [("move", "SD_1/Harbor/day1/1T01.wav"), ("move", "SD_2/Harbor/day2/5T01.wav"),
                                  ("remove", "SD_2/Harbor/day1/1T01.wav")])
         removal = next(a for a in actions if a.kind == "remove")
         # Checked against the moving copy where it is now, before it moves.
-        self.assertEqual(removal.dst, os.path.join(self.root, "SD_1/Harbor/day1/1T01.wav"))
+        self.assertEqual(removal.dst, compat.join(self.root, "SD_1/Harbor/day1/1T01.wav"))
         self.assertEqual({a.dst for a in actions if a.kind == "move"},
-                         {os.path.join(new, "day1/1T01.wav"), os.path.join(new, "day2/5T01.wav")})
+                         {compat.join(new, "day1/1T01.wav"), compat.join(new, "day2/5T01.wav")})
 
     def test_batch_helpers(self):
         self.make("Harbor/day1/1T01.wav", project="Harbor", time_reference=1)
@@ -269,24 +269,24 @@ class DuplicatesTest(unittest.TestCase):
         self.make("SD_1/Harbor/day1/1T01.wav", project="Harbor", time_reference=1)
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "folders")
-        self.assertEqual(d.suggest_keep_folder(group, self.root, self.containers)[0], os.path.join(self.root, "Harbor"))
+        self.assertEqual(d.suggest_keep_folder(group, self.root, self.containers)[0], compat.join(self.root, "Harbor"))
         self.assertEqual(d.default_project_name(group), "")
         # An earlier merge moved the card copy away: the refreshed group no longer has it.
-        os.remove(os.path.join(self.root, "SD_1/Harbor/day1/1T01.wav"))
+        os.remove(compat.join(self.root, "SD_1/Harbor/day1/1T01.wav"))
         fresh = d.refresh_group(group, self.recs(), self.root)
         self.assertEqual(len(fresh.files), 2)
-        self.assertEqual(fresh.locations, [os.path.join(self.root, "Harbor"), os.path.join(self.root, "SD_1/Harbor")])
+        self.assertEqual(fresh.locations, [compat.join(self.root, "Harbor"), compat.join(self.root, "SD_1/Harbor")])
 
     def test_name_merge_retags(self):
         self.make("SD_1/Night Shift/1T01.wav", project="NIGHT SHIFT", time_reference=1)
         self.make("SD_1/Night Shift/NIGHTSHIFT/2T01.wav", project="NIGHTSHIFT", time_reference=2)
         recs = self.recs()
         group = next(g for g in d.find_duplicate_projects(recs, self.root, self.containers) if g.kind == "spelling")
-        actions = d.plan_project_merge(recs, group, os.path.join(self.root, "SD_1/Night Shift"), d.Fingerprints(),
+        actions = d.plan_project_merge(recs, group, compat.join(self.root, "SD_1/Night Shift"), d.Fingerprints(),
                                        target_name="NIGHT SHIFT")
         self.assertEqual([(a.kind, a.rec.project) for a in actions], [("retag", "NIGHTSHIFT")])
         self.assertEqual(d.default_project_name(group), "NIGHT SHIFT")  # a tie: the folder's name wins
-        only_names = d.plan_project_merge(recs, group, os.path.join(self.root, "SD_1/Night Shift"),
+        only_names = d.plan_project_merge(recs, group, compat.join(self.root, "SD_1/Night Shift"),
                                           d.Fingerprints(), target_name="NIGHTSHIFT", move_files=False)
         self.assertEqual([a.rec.project for a in only_names], ["NIGHT SHIFT"])
 

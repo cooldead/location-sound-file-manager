@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QPushButton, QScrollArea, QSlider, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from . import report, settings
+from . import compat, report, settings
 from .catalog import Recording
 
 
@@ -300,7 +300,7 @@ class SetupDialog(QDialog):
         library_browse = QPushButton("Browse…")
         library_browse.clicked.connect(lambda: self._browse(self.library, "Library folder"))
         self.separate_library.setChecked(bool(library) and bool(recent) and
-                                         os.path.normpath(library) != os.path.normpath(recent[0]))
+                                         compat.normpath(library) != compat.normpath(recent[0]))
         self.separate_library.toggled.connect(self._update_folders)
         self._library_widgets = (self.library, library_browse)
         output_row = QHBoxLayout()
@@ -364,7 +364,7 @@ class SetupDialog(QDialog):
     def _browse(self, edit: QLineEdit, title: str):
         folder = QFileDialog.getExistingDirectory(self, title, edit.text() or "/mnt")
         if folder:
-            edit.setText(os.path.normpath(folder))
+            edit.setText(compat.normpath(folder))
 
     def _update_folders(self):
         for widget in self._library_widgets:
@@ -382,11 +382,11 @@ class SetupDialog(QDialog):
         self.footer_note.setText(_footer_note(info))
 
     def output_folder(self) -> str:
-        return os.path.normpath(self.output.text().strip()) if self.output.text().strip() else ""
+        return compat.normpath(self.output.text().strip()) if self.output.text().strip() else ""
 
     def library_folder(self) -> str:
         if self.separate_library.isChecked() and self.library.text().strip():
-            return os.path.normpath(self.library.text().strip())
+            return compat.normpath(self.library.text().strip())
         return self.output_folder()
 
     def accept(self):

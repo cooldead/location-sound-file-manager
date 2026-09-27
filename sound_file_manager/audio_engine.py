@@ -18,7 +18,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
-from . import bwf
+from . import bwf, compat
 from .mixer import MixerState
 from .waveform import decode
 
@@ -69,7 +69,7 @@ class AudioEngine(QObject):
     def open(self, path: str, start_frame: int = 0) -> None:
         """Open a WAV (stopped at start_frame). Raises OSError / bwf.WavError."""
         self.close()
-        fd = os.open(path, os.O_RDONLY)
+        fd = os.open(path, compat.O_RDONLY)
         try:
             with os.fdopen(os.dup(fd), "rb") as f:
                 layout = bwf.read_layout(f, os.fstat(f.fileno()).st_size)
@@ -332,7 +332,7 @@ def _pread_all(fd: int, size: int, offset: int) -> bytes:
     """pread until size bytes or the end of the file (SMB returns short reads)."""
     parts = []
     while size > 0:
-        chunk = os.pread(fd, size, offset)
+        chunk = compat.pread(fd, size, offset)
         if not chunk:
             break
         parts.append(chunk)

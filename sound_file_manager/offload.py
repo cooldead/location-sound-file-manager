@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import compat
+
 # Recorder housekeeping folders that are never offloaded.
 SYSTEM_FOLDERS = {"SOUNDDEV", "SETTINGS", "TRASH", "MIDI_MAPPING", ".fseventsd", ".Trashes", ".Spotlight-V100",
                   "System Volume Information", "$RECYCLE.BIN", "LOST.DIR"}
@@ -32,7 +34,7 @@ SYSTEM_FOLDERS = {"SOUNDDEV", "SETTINGS", "TRASH", "MIDI_MAPPING", ".fseventsd",
 FALSE_TAKES = "FALSETAKES"
 ROOT_FILES = "(files at card root)"
 # Where removable media are mounted (the Browse button starts here).
-MEDIA_FOLDER = "/Volumes" if sys.platform == "darwin" else "/run/media"
+MEDIA_FOLDER = {"darwin": "/Volumes", "win32": ""}.get(sys.platform, "/run/media")  # Windows: "This PC"
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class Card:
     path: str
     label: str
     size: int = 0  # bytes, 0 if unknown
-    device: str = ""  # e.g. /dev/sdc1 (Linux) or /dev/disk4 (macOS), for ejecting
+    device: str = ""  # e.g. /dev/sdc1 (Linux), /dev/disk4 (macOS) or E: (Windows), for ejecting
 
 
 def removable_mounts() -> list[Card]:
@@ -49,6 +51,10 @@ def removable_mounts() -> list[Card]:
     those can still be chosen with Browse."""
     if sys.platform == "darwin":
         return _mac_removable_mounts()
+    if sys.platform == "win32":
+        from . import win_drives
+        return [Card(root, label or f"Removable Disk ({root[:2]})", size, root[:2])
+                for root, label, size in win_drives.removable_drives()]
     try:
         out = subprocess.run(["lsblk", "-J", "-b", "-o", "PATH,MOUNTPOINT,RM,LABEL,SIZE"],
                              capture_output=True, text=True, timeout=5).stdout
@@ -124,7 +130,7 @@ def card_from_diskutil(mount: str, info: dict) -> Card | None:
 
 def looks_like_card(path: str) -> bool:
     """A recorder card: a SOUNDDEV folder, or WAV files in the top two levels."""
-    if os.path.isdir(os.path.join(path, "SOUNDDEV")):
+    if os.path.isdir(compat.join(path, "SOUNDDEV")):
         return True
 
     def has_wav(folder: str, depth: int) -> bool:
@@ -137,7 +143,7 @@ def looks_like_card(path: str) -> bool:
             return True
         if depth == 0:
             return False
-        return any(has_wav(e.path, depth - 1) for e in items[:200]
+        return any(has_wav(compat.fwd(e.path), depth - 1) for e in items[:200]
                    if e.is_dir(follow_symlinks=False) and not is_system_folder(e.name))
 
     return has_wav(path, 2)
@@ -158,6 +164,9 @@ def eject(card: Card) -> str:
         except (OSError, subprocess.SubprocessError) as error:
             return str(error)
         return "" if done.returncode == 0 else (done.stderr or done.stdout).strip()
+    if sys.platform == "win32":
+        from . import win_drives
+        return win_drives.eject(card.device)
     for args in (["udisksctl", "unmount", "-b", card.device], ["udisksctl", "power-off", "-b", card.device]):
         try:
             done = subprocess.run(args, capture_output=True, text=True, timeout=30)
@@ -186,16 +195,16 @@ def card_files(card_root: str, folders: set[str], *, include_false_takes: bool =
     for name in sorted(folders):
         if name == ROOT_FILES:
             with os.scandir(card_root) as entries:
-                result += sorted(e.path for e in entries if e.is_file() and not e.name.startswith("."))
+                result += sorted(compat.fwd(e.path) for e in entries if e.is_file() and not e.name.startswith("."))
             continue
         if name == FALSE_TAKES and not include_false_takes:
             continue
-        for folder, dirs, files in os.walk(os.path.join(card_root, name)):
+        for folder, dirs, files in os.walk(compat.join(card_root, name)):
             dirs[:] = sorted(d for d in dirs if not d.startswith("."))
             for f in sorted(files):
                 if f.startswith("._") or f == ".DS_Store":
                     continue
-                result.append(os.path.join(folder, f))
+                result.append(compat.join(folder, f))
     return result
 
 
@@ -232,7 +241,7 @@ def destination_for(src: str, card_root: str, library: str, folder_names: dict[s
     name = (new_names or {}).get(src)
     if name:
         rest = (*rest[:-1], name)
-    return str(Path(library, target_folder, *rest)) if target_folder else str(Path(library, *rest))
+    return compat.fwd(Path(library, target_folder, *rest) if target_folder else Path(library, *rest))
 
 
 def plan_copy(files: list[str], card_root: str, library: str, folder_names: dict[str, str],
@@ -324,7 +333,7 @@ def copy_items(items: list[CopyItem], *, verify: bool = True,
         try:
             folder = os.path.dirname(item.dst)
             _make_dirs(folder, result.created_dirs)
-            temp = os.path.join(folder, f".sfm-part-{uuid.uuid4().hex}")
+            temp = compat.join(folder, f".sfm-part-{uuid.uuid4().hex}")
             source_hash = hashlib.md5()
             state.phase = "copy"
             with open(item.src, "rb") as src, open(temp, "wb") as dst:
@@ -398,7 +407,7 @@ def common_folder(paths: list[str]) -> str:
     if not paths:
         return ""
     folders = [os.path.dirname(p) for p in paths]
-    return os.path.commonpath(folders) if len(folders) > 1 else folders[0]
+    return compat.fwd(os.path.commonpath(folders)) if len(folders) > 1 else folders[0]
 
 
 def human_size(size: float) -> str:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sound_file_manager import mixer, organize, waveform
+from sound_file_manager import compat, mixer, organize, waveform
 from sound_file_manager.catalog import Recording
 from sound_file_manager.mixer import OFF, Lane, MixerState
 
@@ -123,7 +123,7 @@ class MixerStateTest(unittest.TestCase):
 class WaveformLevelsTest(unittest.TestCase):
     def test_peak_and_rms(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "a.wav")
+            path = compat.join(tmp, "a.wav")
             make_wav(path, frames=48000, levels=[0x400000, 0x100000])
             levels = waveform.compute_peaks(path, buckets=100)
             self.assertEqual(levels.shape, (2, 2, 100))
@@ -236,7 +236,7 @@ class MarkersTest(unittest.TestCase):
 
         from sound_file_manager import bwf
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "c.wav")
+            path = compat.join(tmp, "c.wav")
             make_wav(path, frames=48000)
             cue = struct.pack("<I", 2) + struct.pack("<II4sIII", 1, 0, b"data", 0, 0, 24000) + \
                 struct.pack("<II4sIII", 2, 0, b"data", 0, 0, 1200)
@@ -250,11 +250,11 @@ class MarkersTest(unittest.TestCase):
                 f.seek(4)
                 f.write(struct.pack("<I", size - 8))
             self.assertEqual(bwf.read_cues(path), [(1200, "Cue 1"), (24000, "plane")])
-            self.assertEqual(bwf.read_cues(os.path.join(tmp, "c.wav"))[1][1], "plane")
+            self.assertEqual(bwf.read_cues(compat.join(tmp, "c.wav"))[1][1], "plane")
 
     def test_range_levels(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "r.wav")
+            path = compat.join(tmp, "r.wav")
             make_wav(path, frames=4800)
             part = waveform.compute_peaks(path, 50, first_frame=1000, end_frame=2000)
             self.assertEqual(part.shape, (2, 2, 50))

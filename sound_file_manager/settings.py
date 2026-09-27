@@ -8,6 +8,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, QStandardPaths
 
+from . import compat
+
 DEFAULTS: dict[str, object] = {
     "setup_done": False,             # the first-run Setup window was shown
     "library_folder": "",            # the folder that is scanned ("" = ask on first start)
@@ -52,14 +54,20 @@ DEFAULTS: dict[str, object] = {
 }
 
 
+# Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
+PATH_KEYS = {"library_folder", "mixer_folder", "offload_destinations"}
+
+
 def get(settings: QSettings, key: str):
     default = DEFAULTS[key]
     if isinstance(default, list):
         value = settings.value(key, default)
         if isinstance(value, str):  # QSettings returns a 1-item list as a string
             value = [value]
-        return [str(v) for v in value] if value else []
-    return settings.value(key, default, type(default))
+        value = [str(v) for v in value] if value else []
+        return [compat.fwd(v) for v in value] if key in PATH_KEYS else value
+    value = settings.value(key, default, type(default))
+    return compat.fwd(value) if key in PATH_KEYS else value
 
 
 def put(settings: QSettings, key: str, value) -> None:
@@ -112,8 +120,10 @@ def migrate_old_folders() -> list[str]:
 def open_settings() -> QSettings:
     """~/.config/location-sound-file-manager/settings.ini (macOS: in
     ~/Library/Application Support/location-sound-file-manager/, next to the
-    history, where Mac apps keep their files; Qt would use ~/.config there too)."""
-    if sys.platform == "darwin":
+    history, where Mac apps keep their files; Qt would use ~/.config there too.
+    Windows: %LOCALAPPDATA%\\location-sound-file-manager\\, also next to the
+    history; this way both follow QStandardPaths' test mode)."""
+    if sys.platform in ("darwin", "win32"):
         return QSettings(str(history_path().parent / "settings.ini"), QSettings.Format.IniFormat)
     return QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, APP_DIR, "settings")
 

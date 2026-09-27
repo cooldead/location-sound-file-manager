@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from . import report, settings
+from . import compat, report, settings
 from .branding_dialog import BrandingDialog, load_branding
 from .catalog import Recording
 
@@ -366,7 +366,7 @@ class ReportDialog(QDialog):
             return False
         group = self.groups[self.index]
         folder = group.default_folder or os.path.expanduser("~")
-        base = os.path.join(folder, report.default_basename(info, self.recs))
+        base = compat.join(folder, report.default_basename(info, self.recs))
         path, _ = QFileDialog.getSaveFileName(self, "Save sound report", base + (".pdf" if pdf else ".csv"),
                                               "PDF (*.pdf);;CSV (*.csv)")
         if not path:
@@ -397,7 +397,7 @@ class ReportDialog(QDialog):
         plan = []
         for group, info in zip(self.groups, infos):
             folder = group.default_folder or os.path.expanduser("~")
-            plan.append((group, info, _unique_stem(os.path.join(folder, report.default_basename(info, group.recs)))))
+            plan.append((group, info, _unique_stem(compat.join(folder, report.default_basename(info, group.recs)))))
         listing = "\n".join(f"• {stem}{'.pdf' if pdf else '.csv'}" for _, _, stem in plan)
         if QMessageBox.question(self, "Save all reports", f"Save {len(plan)} reports?\n\n{listing}") \
                 != QMessageBox.StandardButton.Yes:

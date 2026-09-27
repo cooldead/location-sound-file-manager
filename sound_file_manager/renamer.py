@@ -8,6 +8,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +39,19 @@ def validate_name(name: str) -> str | None:
         return "name cannot contain a NUL character"
     if len(name.encode("utf-8", "surrogateescape")) > MAX_NAME_BYTES:
         return f"name is longer than {MAX_NAME_BYTES} bytes"
+    if sys.platform == "win32":
+        bad = sorted(set(name) & set(_WINDOWS_BAD_CHARS))
+        if bad:
+            return "name cannot contain " + " ".join(f"'{c}'" for c in bad) + " on Windows"
+        if name != name.rstrip(" ."):
+            return "name cannot end with a space or '.' on Windows"
+        if name.split(".")[0].strip().upper() in _WINDOWS_RESERVED:
+            return f"'{name.split('.')[0]}' is a reserved name on Windows"
     return None
+
+
+_WINDOWS_BAD_CHARS = '\\:*?"<>|'
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
 def target_for(src: Path, text: str, suffix: str) -> Path:

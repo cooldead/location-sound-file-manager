@@ -17,7 +17,6 @@ byte with the copy that is kept (see files_identical / audio_identical).
 from __future__ import annotations
 
 import difflib
-import fcntl
 import hashlib
 import os
 import re
@@ -26,8 +25,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import bwf
+from . import bwf, compat
 from .catalog import REMOVED_FOLDER, Recording, day_of, project_folder_of
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 SAMPLE_BLOCK = 64 << 10
 # Added to the name of a file that is kept for review instead of removed
@@ -57,21 +61,21 @@ def sample_hash(path: str) -> str:
     buffered read pulls in megabytes (measured 99 ms per file, now ~50 ms).
     """
     digest = hashlib.md5()
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, compat.O_RDONLY)
     try:
         if hasattr(os, "posix_fadvise"):
             os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_RANDOM)
-        elif hasattr(fcntl, "F_RDAHEAD"):  # macOS has no fadvise; this turns read-ahead off
+        elif fcntl is not None and hasattr(fcntl, "F_RDAHEAD"):  # macOS has no fadvise; this turns read-ahead off
             fcntl.fcntl(fd, fcntl.F_RDAHEAD, 0)
         with os.fdopen(fd, "rb", buffering=0, closefd=False) as f:
             layout = bwf.read_layout(f, os.fstat(fd).st_size)
         fmt, data = layout.first(b"fmt "), layout.first(b"data")
-        digest.update(os.pread(fd, fmt.size, fmt.data_offset))
+        digest.update(compat.pread(fd, fmt.size, fmt.data_offset))
         if data is None:
             return digest.hexdigest()
         digest.update(str(data.size).encode())
         for start in sorted({0, max(data.size // 2 - SAMPLE_BLOCK // 2, 0), max(data.size - SAMPLE_BLOCK, 0)}):
-            digest.update(os.pread(fd, min(SAMPLE_BLOCK, data.size - start), data.data_offset + start))
+            digest.update(compat.pread(fd, min(SAMPLE_BLOCK, data.size - start), data.data_offset + start))
     finally:
         os.close(fd)
     return digest.hexdigest()
@@ -540,12 +544,12 @@ def project_locations(recs: Iterable[Recording], root: str, containers: Iterable
             continue
         top = parts[0] if len(parts) > 1 else ""
         if top.casefold() in skip and len(parts) > 2:
-            top = os.path.join(parts[0], parts[1])
+            top = compat.join(parts[0], parts[1])
         by_place[(rec.project, top)].append(rec)
     result: dict[str, list[str]] = defaultdict(list)
     for (project, _), group in by_place.items():
         folder = project_folder_of(group, root, containers)
-        if folder and os.path.normpath(folder) != os.path.normpath(root) and folder not in result[project]:
+        if folder and compat.normpath(folder) != compat.normpath(root) and folder not in result[project]:
             result[project].append(folder)
     return dict(result)
 
@@ -894,7 +898,7 @@ def plan_project_merge(recs: list[Recording], group: ProjectGroup, target_folder
                                       level))
             if twin is not None:
                 continue
-        dst = os.path.join(target_folder, relative_in_project(rec, group.locations))
+        dst = compat.join(target_folder, relative_in_project(rec, group.locations))
         if dst in taken:
             other = by_path.get(dst)
             planned = None
@@ -1000,12 +1004,12 @@ def removal_path(path: str, root: str, project: str = "") -> str:
     so it is clear which project it belonged to and where it was."""
     from .organize import safe_part
     try:
-        relative = os.path.relpath(path, root)
+        relative = compat.relpath(path, root)
     except ValueError:
         relative = path.lstrip("/")
     if relative.startswith(".."):
         relative = path.lstrip("/")
-    return os.path.join(root, REMOVED_FOLDER, safe_part(project) or "No Project", relative)
+    return compat.join(root, REMOVED_FOLDER, safe_part(project) or "No Project", relative)
 
 
 def is_review_copy(name: str) -> bool:
@@ -1017,10 +1021,10 @@ def review_path(path: str, folder: str, taken: set[str] | None = None) -> str:
     """<folder>/<name>_ReviewForDeletion<ext>, numbered if that name is taken."""
     stem, ext = os.path.splitext(os.path.basename(path))
     taken = taken if taken is not None else set()
-    candidate = os.path.join(folder, f"{stem}{REVIEW_TAG}{ext}")
+    candidate = compat.join(folder, f"{stem}{REVIEW_TAG}{ext}")
     n = 2
     while candidate in taken or os.path.lexists(candidate):
-        candidate = os.path.join(folder, f"{stem}{REVIEW_TAG} ({n}){ext}")
+        candidate = compat.join(folder, f"{stem}{REVIEW_TAG} ({n}){ext}")
         n += 1
     taken.add(candidate)
     return candidate
@@ -1042,7 +1046,7 @@ def pair_review_copies(recs: list[Recording]) -> list[tuple[Recording, Recording
             continue
         stem, ext = os.path.splitext(rec.name)
         original = re.sub(r"\s*\(\d+\)$", "", stem.split(REVIEW_TAG)[0]) + ext
-        match = by_path.get(os.path.join(rec.folder, original))
+        match = by_path.get(compat.join(rec.folder, original))
         how = "same name" if match else ""
         if match is None:
             candidates = by_key.get(audio_key(rec), [])
@@ -1085,15 +1089,15 @@ def compare_rows(a: Recording, b: Recording | None) -> list[tuple[str, str, str,
 def removed_items(root: str) -> list[tuple[str, str, str, int]]:
     """Files in the removed-duplicates folder: (path, project folder, original
     path in the library, size)."""
-    base = os.path.join(root, REMOVED_FOLDER)
+    base = compat.join(root, REMOVED_FOLDER)
     items = []
     for folder, dirs, files in os.walk(base):
         dirs.sort()
         for name in sorted(files):
-            path = os.path.join(folder, name)
+            path = compat.join(folder, name)
             parts = Path(path).relative_to(base).parts
             project = parts[0] if len(parts) > 1 else ""
-            original = os.path.join(root, *parts[1:]) if len(parts) > 1 else os.path.join(root, *parts)
+            original = compat.join(root, *parts[1:]) if len(parts) > 1 else compat.join(root, *parts)
             try:
                 size = os.path.getsize(path)
             except OSError:

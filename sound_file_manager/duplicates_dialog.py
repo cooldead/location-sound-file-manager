@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import catalog, duplicates
+from . import catalog, compat, duplicates
 from .catalog import REMOVED_FOLDER, Recording
 from .offload import human_size
 from .renamer import validate_name
@@ -771,9 +771,9 @@ class DuplicatesWindow(QDialog):
         if problem:
             self.new_folder_path.setText(f"<span style='color:{RED.name()}'>{problem}</span>")
         elif os.path.isdir(path):
-            typed = os.path.join(self.root_getter(), *[p.strip() for p in self.new_folder.text().split("/") if p.strip()])
+            typed = compat.join(self.root_getter(), *[p.strip() for p in self.new_folder.text().split("/") if p.strip()])
             case = ("<br>The share ignores upper/lower case, so this is the existing folder with that name."
-                    if os.path.normpath(typed) != os.path.normpath(path) else "")
+                    if compat.normpath(typed) != compat.normpath(path) else "")
             self.new_folder_path.setText(f"<b>{path}</b><br>This folder already exists; the files are merged "
                                          "into it." + case)
         else:
@@ -1141,7 +1141,7 @@ def _existing_spelling(root: str, parts: list[str]) -> str:
             names = []
         if part not in names:
             part = next((n for n in names if n.casefold() == part.casefold()), part)
-        path = os.path.join(path, part)
+        path = compat.join(path, part)
     return path
 
 
@@ -1149,7 +1149,7 @@ def _relative(path: str, root: str) -> str:
     if not path:
         return ""
     try:
-        relative = os.path.relpath(path, root)
+        relative = compat.relpath(path, root)
     except ValueError:
         return path
     return "" if relative == "." else relative
@@ -1307,7 +1307,7 @@ class BatchMergeDialog(QDialog):
                     job.report(n, len(groups), f"Planning {' / '.join(group.names)}…")
                     name = duplicates.default_project_name(group)
                     if new_folders:
-                        target = os.path.join(root, duplicates.suggested_folder_name(group, name))
+                        target = compat.join(root, duplicates.suggested_folder_name(group, name))
                     else:
                         target = duplicates.suggest_keep_folder(group, root, containers)[0]
                     results.append((target, name, duplicates.plan_project_merge(

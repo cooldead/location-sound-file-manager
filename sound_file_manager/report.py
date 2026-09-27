@@ -251,7 +251,7 @@ def table(recs: list[Recording], columns: list[str] | None = None) -> tuple[list
 # characters that fit across it at 8 pt; plus how wide the long-text columns
 # may grow before they wrap.
 # The PDF font; column widths are measured with the same one. Noto Sans is not on a Mac.
-REPORT_FONT = "Helvetica Neue" if sys.platform == "darwin" else "Noto Sans"
+REPORT_FONT = {"darwin": "Helvetica Neue", "win32": "Segoe UI"}.get(sys.platform, "Noto Sans")
 PAGE_WIDTH_MM = {"landscape": 279.4 - 24, "portrait": 215.9 - 24}
 LINE_CHARS = {"landscape": 175, "portrait": 130}
 WRAP_CAPS = {"notes": 70, "tracks": 40}

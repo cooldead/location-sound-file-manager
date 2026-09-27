@@ -28,6 +28,7 @@ import uuid
 from dataclasses import asdict
 from typing import Iterable
 
+from . import compat
 from .catalog import CACHED_FIELDS, PARSER_VERSION, Recording
 
 INDEX_FOLDER = ".sfm-index"  # hidden, so the scanner and folder tools skip it
@@ -42,7 +43,7 @@ _LEVELS_MAGIC = b"SFMW"
 
 
 def index_folder(root: str) -> str:
-    return os.path.join(root, INDEX_FOLDER)
+    return compat.join(root, INDEX_FOLDER)
 
 
 def relative_key(root: str, path: str) -> str | None:
@@ -61,7 +62,7 @@ def _same(size: int, mtime: float, entry_size: int, entry_mtime: float) -> bool:
 def _write_atomic(path: str, data: bytes) -> None:
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
-    temp = os.path.join(folder, f".tmp-{uuid.uuid4().hex}")
+    temp = compat.join(folder, f".tmp-{uuid.uuid4().hex}")
     try:
         with open(temp, "wb") as f:
             f.write(data)
@@ -86,7 +87,7 @@ class LibraryIndex:
 
     @property
     def path(self) -> str:
-        return os.path.join(index_folder(self.root), METADATA_FILE)
+        return compat.join(index_folder(self.root), METADATA_FILE)
 
     @classmethod
     def load(cls, root: str) -> LibraryIndex:
@@ -157,11 +158,11 @@ def waveform_path(root: str, path: str) -> str | None:
     if key is None:
         return None
     digest = hashlib.sha1(key.encode()).hexdigest()
-    return os.path.join(index_folder(root), WAVEFORM_FOLDER, digest[:2], digest + ".lvl")
+    return compat.join(index_folder(root), WAVEFORM_FOLDER, digest[:2], digest + ".lvl")
 
 
 def has_waveforms(root: str) -> bool:
-    return os.path.isdir(os.path.join(index_folder(root), WAVEFORM_FOLDER))
+    return os.path.isdir(compat.join(index_folder(root), WAVEFORM_FOLDER))
 
 
 def read_levels(root: str, path: str, size: int, mtime: float) -> bytes | None:

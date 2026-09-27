@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from sound_file_manager import bwf, catalog, duplicates, waveform
+from sound_file_manager import bwf, catalog, compat, duplicates, waveform
 
 from .wavmaker import make_wav
 
@@ -24,7 +24,7 @@ class FloatWavTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def path(self, name):
-        return os.path.join(self.tmp.name, name)
+        return compat.join(self.tmp.name, name)
 
     def test_parse_plain_extensible_and_64(self):
         for name, kwargs in (("plain.wav", {}), ("ext.wav", {"extensible": True}),
@@ -93,7 +93,7 @@ class FloatEngineTest(unittest.TestCase):
         from . import qt_app
         qt_app()
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "e.wav")
+            path = compat.join(tmp, "e.wav")
             samples = tone(peak=2.0)  # peaks above 0 dBFS
             make_wav(path, float_samples=samples, extensible=True)
             engine = AudioEngine()

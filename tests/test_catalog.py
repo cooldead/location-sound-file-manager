@@ -4,7 +4,7 @@ import unittest
 from fractions import Fraction
 from pathlib import Path
 
-from sound_file_manager import catalog, organize
+from sound_file_manager import catalog, compat, organize
 from sound_file_manager import timecode as tc
 from sound_file_manager.catalog import Recording
 
@@ -55,7 +55,7 @@ class CatalogTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def make(self, relative, **kwargs):
-        path = os.path.join(self.root, relative)
+        path = compat.join(self.root, relative)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         make_wav(path, **kwargs)
         return path
@@ -71,17 +71,17 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(rec.family, "FAM1")
 
     def test_filename_fallback_for_scene_take(self):
-        path = os.path.join(self.root, "56A-T005.WAV")
+        path = compat.join(self.root, "56A-T005.WAV")
         make_wav(path, with_ixml=False, with_bext=False)
         rec = catalog.read_recording(path)
         self.assertEqual((rec.scene, rec.take), ("56A", "005"))
-        path = os.path.join(self.root, "Test 1T02_ISO.wav")
+        path = compat.join(self.root, "Test 1T02_ISO.wav")
         make_wav(path, with_ixml=False, with_bext=False)
         rec = catalog.read_recording(path)
         self.assertEqual((rec.scene, rec.take), ("Test 1", "02"))
 
     def test_broken_file_is_recorded_with_error(self):
-        path = os.path.join(self.root, "bad.wav")
+        path = compat.join(self.root, "bad.wav")
         Path(path).write_bytes(b"nope")
         rec = catalog.read_recording(path)
         self.assertTrue(rec.error)
@@ -107,8 +107,8 @@ class CatalogTest(unittest.TestCase):
         self.make("P/b.WAV")
         Path(self.root, "P", "._a.wav").write_bytes(b"x")  # AppleDouble, skipped
         Path(self.root, ".hidden").mkdir()
-        make_wav(os.path.join(self.root, ".hidden", "c.wav"))
-        cache = catalog.Cache(os.path.join(self.root, "cache", "c.sqlite"))
+        make_wav(compat.join(self.root, ".hidden", "c.wav"))
+        cache = catalog.Cache(compat.join(self.root, "cache", "c.sqlite"))
         got = []
         stats = catalog.scan(self.root, cache, on_batch=got.extend)
         self.assertEqual((stats.found, stats.parsed), (2, 2))
@@ -137,8 +137,8 @@ class OrganizeTest(unittest.TestCase):
 
     def test_plan_moves(self):
         with tempfile.TemporaryDirectory() as root:
-            a = os.path.join(root, "a.wav")
-            b = os.path.join(root, "sub", "a.wav")
+            a = compat.join(root, "a.wav")
+            b = compat.join(root, "sub", "a.wav")
             os.makedirs(os.path.dirname(b))
             Path(a).write_text("a")
             Path(b).write_text("b")

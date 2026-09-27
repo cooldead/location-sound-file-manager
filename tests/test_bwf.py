@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sound_file_manager import bwf
+from sound_file_manager import bwf, compat
 
 from .wavmaker import make_wav
 
@@ -20,7 +20,7 @@ def audio_bytes(path):
 class ReadTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.dir.name, "a.wav")
+        self.path = compat.join(self.dir.name, "a.wav")
 
     def tearDown(self):
         self.dir.cleanup()
@@ -95,7 +95,7 @@ class ReadTests(unittest.TestCase):
 class WriteTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.dir.name, "a.wav")
+        self.path = compat.join(self.dir.name, "a.wav")
 
     def tearDown(self):
         self.dir.cleanup()

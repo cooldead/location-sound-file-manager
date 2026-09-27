@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 
-from sound_file_manager import catalog, offload, report
+from sound_file_manager import catalog, compat, offload, report
 from sound_file_manager.catalog import Recording
 
 from . import qt_app
@@ -45,7 +45,7 @@ class OffloadTest(unittest.TestCase):
 
     def test_card_files(self):
         files = offload.card_files(str(self.card), {"Orchard", "FALSETAKES"})
-        names = sorted(os.path.relpath(f, self.card) for f in files)
+        names = sorted(compat.relpath(f, self.card) for f in files)
         self.assertIn("Orchard/26Y08M25/.daily_folder", names)
         self.assertIn("Orchard/report.CSV", names)
         self.assertNotIn("FALSETAKES/9T01_ISO.wav", names)  # only when asked for
@@ -55,10 +55,10 @@ class OffloadTest(unittest.TestCase):
     def test_destination_keeps_card_layout(self):
         src = str(self.card / "Orchard" / "26Y08M25" / "1T01_ISO.wav")
         self.assertEqual(offload.destination_for(src, str(self.card), str(self.nas), {"Orchard": "Orchard"}),
-                         str(self.nas / "Orchard" / "26Y08M25" / "1T01_ISO.wav"))
+                         compat.fwd(self.nas / "Orchard" / "26Y08M25" / "1T01_ISO.wav"))
         self.assertEqual(offload.destination_for(src, str(self.card), str(self.nas), {"Orchard": "Orchard 2026"},
                                                  {src: "new.wav"}),
-                         str(self.nas / "Orchard 2026" / "26Y08M25" / "new.wav"))
+                         compat.fwd(self.nas / "Orchard 2026" / "26Y08M25" / "new.wav"))
 
     def test_plan_and_copy(self):
         files = offload.card_files(str(self.card), {"Orchard"})
@@ -127,7 +127,7 @@ class ReportTest(unittest.TestCase):
 
     def test_csv(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "r.csv")
+            path = compat.join(folder, "r.csv")
             info = report.ReportInfo({"project": "Orchard", "mixer": "Alex Mixer"}, "Boom on 1")
             report.write_csv(path, info, [self.rec("1T01_ISO.wav", circled=True)])
             info.columns = ["file", "circled"]
@@ -182,7 +182,7 @@ class ReportTest(unittest.TestCase):
         app = qt_app()  # noqa: F841
         with tempfile.TemporaryDirectory() as folder:
             for orientation in ("portrait", "landscape"):
-                path = os.path.join(folder, f"{orientation}.pdf")
+                path = compat.join(folder, f"{orientation}.pdf")
                 report.write_pdf(path, report.ReportInfo({"project": "P"}, orientation=orientation),
                                  [self.rec("a.wav")])
                 data = Path(path).read_bytes()
@@ -233,7 +233,7 @@ class ReportTest(unittest.TestCase):
     def test_pdf_footer(self):
         app = qt_app()  # noqa: F841
         with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "r.pdf")
+            path = compat.join(folder, "r.pdf")
             report.write_pdf(path, report.ReportInfo({"project": "P"}, branding=report.Branding(
                 logo="", footer="Footer 555-0100")), [self.rec("a.wav")])
             self.assertGreater(os.path.getsize(path), 1000)

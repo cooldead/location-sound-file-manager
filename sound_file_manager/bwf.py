@@ -25,6 +25,8 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
+from . import compat
+
 BEXT_DESCRIPTION_SIZE = 256
 FILLER_CHUNKS = {b"JUNK", b"junk", b"PAD ", b"FLLR", b"filr"}
 WAV_FORMS = (b"RIFF", b"RF64", b"BW64")
@@ -495,7 +497,7 @@ def _rewrite(path: str, layout: Layout, bext: Chunk | None, description: bytes |
     """Copy the file with new bext/iXML chunks to a temp file next to it, check
     it, then atomically replace the original. Returns the bytes copied."""
     folder = os.path.dirname(path) or "."
-    temp = os.path.join(folder, f".sfm-tmp-{uuid.uuid4().hex}.wav")
+    temp = compat.join(folder, f".sfm-tmp-{uuid.uuid4().hex}.wav")
     had_ixml = layout.first(b"iXML") is not None
     ds64_new = None
     try:
