@@ -18,8 +18,14 @@ DEFAULTS: dict[str, object] = {
     "container_folders": ["SD_1", "SD_2", "833 BACK UPS"],
     "write_embedded_filename": True,  # renames also update the name stored inside the WAV
     "apply_to_take_family": True,     # metadata edits include the take's other files (_ISO/_LR)
+    "rename_on_scene_take": True,     # editing scene or take in the Library renames the file to match
     "organize_pattern": "{project}/{day}",
     "organize_remove_empty": True,
+    "split_keep_original": True,      # splitting moves the original into the take folder (else: removed folder)
+    "safety_mode": "safe",            # "dangerous": split/combine keep permanent delete as a choice, no confirmation
+    "combine_sources": "keep",        # after combining, the files: "keep", "remove" (removed folder), "delete"
+    "split_delete_permanently": False,  # originals that leave a split are deleted instead of moved away
+    "split_shrink_original": False,   # tracks not split off: the original is shrunk to them (else kept whole)
     "confirm_undo": True,
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
     "waveform_scale": "db",           # "db" or "linear"

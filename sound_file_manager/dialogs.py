@@ -8,17 +8,19 @@ import json
 import os
 import shutil
 import time
+from html import escape as escape_html
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QMenu, QPlainTextEdit, QPushButton, QRadioButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import compat, library_index, organize, settings, waveform
+from . import compat, library_index, organize, settings, splitter, waveform
+from .catalog import REMOVED_FOLDER
 from .catalog import Recording
 from .renamer import validate_name
 
@@ -406,6 +408,423 @@ class OrganizeDialog(QDialog):
         return [m for m in self.moves if not m.unchanged and not m.error]
 
 
+def dangerous_mode(qsettings: QSettings) -> bool:
+    return settings.get(qsettings, "safety_mode") == "dangerous"
+
+
+def dangerous_label() -> QLabel:
+    label = QLabel(f"<span style='color:{ERROR_COLOR.name()}'><b>Dangerous mode</b>: your last choices are "
+                   "used, and files set to be deleted are deleted permanently without asking (Settings).</span>")
+    label.setWordWrap(True)
+    return label
+
+
+def confirm_permanent_delete(parent: QWidget, recs: list[Recording]) -> bool:
+    names = [r.name for r in recs]
+    box = QMessageBox(QMessageBox.Icon.Warning, "Delete permanently",
+                      f"Delete {len(names)} file{'s' if len(names) != 1 else ''} permanently?", parent=parent)
+    box.setInformativeText("They are deleted only after the new files are written and checked, but they don't "
+                           "go to the trash, and Undo can't bring them back.\n\n" + "\n".join(names[:12])
+                           + (f"\n… and {len(names) - 12} more" if len(names) > 12 else ""))
+    box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+    box.button(QMessageBox.StandardButton.Yes).setText("Delete Permanently")
+    box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+    return box.exec() == QMessageBox.StandardButton.Yes
+
+
+class SplitDialog(QDialog):
+    """Preview splitting multi-track files into one file per track, with a
+    tick per track: ticked tracks are split off, the others stay with the
+    original (kept whole, or shrunk to just those tracks)."""
+
+    def __init__(self, recs: list[Recording], family_of, qsettings: QSettings, parent=None):
+        super().__init__(parent)
+        self.recs, self.family_of, self.qsettings = recs, family_of, qsettings
+        self.plan = splitter.SplitPlan()
+        self.picked = {r.path: set(range(r.channels)) for r in recs if splitter.splittable(r) is None}
+        self.groups: dict[str, list[tuple[str, list[int]]]] = {path: [] for path in self.picked}
+        self.setWindowTitle("Split into track files")
+        intro = QLabel("Ticked tracks become their own mono files, named after the track, in a folder named "
+                       "after the take; select several and <i>Group into One File</i> to keep them together in "
+                       "one polywav. The new files keep the metadata (scene, take, timecode, notes); the "
+                       "take's other files (e.g. the _LR) move into the folder with them.")
+        intro.setWordWrap(True)
+        self.preview = QTreeWidget()
+        self.preview.setHeaderLabels(["File / track", ""])
+        self.preview.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.preview.header().setStretchLastSection(True)
+        self.preview.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self.group_button = QPushButton("Group into One File…")
+        self.group_button.setToolTip("Put the selected tracks of a file into one polywav instead of a mono file each")
+        self.ungroup_button = QPushButton("Ungroup")
+        self.group_button.clicked.connect(self._group_selected)
+        self.ungroup_button.clicked.connect(self._ungroup_selected)
+        self.preview.itemSelectionChanged.connect(self._selection_changed)
+        self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.preview.customContextMenuRequested.connect(self._track_menu)
+        self.group_hint = QLabel("To put tracks into one polywav: select them (Ctrl- or Shift-click the track "
+                                 "names), then <i>Group into One File…</i> (or right-click).")
+        self.group_hint.setWordWrap(True)
+        self.group_hint.setEnabled(False)
+        tick_all, untick_all = QPushButton("Tick All Tracks"), QPushButton("Untick All")
+        tick_all.clicked.connect(lambda: self._tick_all(True))
+        untick_all.clicked.connect(lambda: self._tick_all(False))
+        ticks = QHBoxLayout()
+        ticks.addWidget(tick_all)
+        ticks.addWidget(untick_all)
+        ticks.addStretch(1)
+        ticks.addWidget(self.group_button)
+        ticks.addWidget(self.ungroup_button)
+
+        self.rest_box = QGroupBox("Tracks you don't split off stay with the original:")
+        self.whole = QRadioButton("It keeps all its tracks: it moves into the folder unchanged")
+        self.shrink = QRadioButton("It is shrunk to just those tracks (same name and metadata, in the folder); "
+                                   f"the full file goes to “{REMOVED_FOLDER}”")
+        (self.shrink if settings.get(qsettings, "split_shrink_original") else self.whole).setChecked(True)
+        rest_layout = QVBoxLayout(self.rest_box)
+        rest_layout.addWidget(self.whole)
+        rest_layout.addWidget(self.shrink)
+        self.keep = QCheckBox("Keep the original file: move it into the folder with the track files")
+        self.keep.setChecked(settings.get(qsettings, "split_keep_original"))
+        self.keep.setToolTip(f"For files split into all their tracks. Otherwise the original goes to "
+                             f"“{REMOVED_FOLDER}” in the library, where you can put it back or delete it for good.")
+        self.gone_box = QGroupBox("Originals that aren't kept (and full files that are shrunk):")
+        self.to_removed = QRadioButton(f"Move them to “{REMOVED_FOLDER}” (they can be put back; Undo works)")
+        self.delete = QRadioButton("Delete them permanently (after the new files are written and checked; "
+                                   "can't be undone)")
+        self.dangerous = dangerous_mode(qsettings)
+        # Safe mode never starts on a permanent delete.
+        (self.delete if self.dangerous and settings.get(qsettings, "split_delete_permanently")
+         else self.to_removed).setChecked(True)
+        gone_layout = QVBoxLayout(self.gone_box)
+        gone_layout.addWidget(self.to_removed)
+        gone_layout.addWidget(self.delete)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        box, self.ok = _buttons(self, "Split")
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(self.preview, 1)
+        layout.addLayout(ticks)
+        layout.addWidget(self.group_hint)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.rest_box)
+        layout.addWidget(self.keep)
+        layout.addWidget(self.gone_box)
+        if self.dangerous:
+            layout.addWidget(dangerous_label())
+        layout.addWidget(box)
+        self.resize(820, 700)
+        self.keep.toggled.connect(self._update)
+        self.whole.toggled.connect(self._update)
+        self.delete.toggled.connect(self._update)
+        self.preview.itemChanged.connect(self._track_ticked)
+        self._update()
+
+    def _tick_all(self, on: bool):
+        for rec in self.recs:
+            if rec.path in self.picked:
+                self.picked[rec.path] = set(range(rec.channels)) if on else set()
+        self._update()
+
+    def _selected_tracks(self) -> list[tuple[str, int]]:
+        found = []
+        for item in self.preview.selectedItems():
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[0] == "group":
+                found += [(data[1], c) for c in self.groups[data[1]][data[2]][1]]
+            elif data:
+                found.append(tuple(data))
+        return list(dict.fromkeys(found))
+
+    def _selection_changed(self):
+        # The group button stays clickable and explains itself; greyed out it went unnoticed.
+        tracks = self._selected_tracks()
+        self.ungroup_button.setEnabled(any(c in members for p, c in tracks for _, members in self.groups[p]))
+
+    def _track_menu(self, pos):
+        item = self.preview.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.preview.clearSelection()
+            item.setSelected(True)
+        menu = QMenu(self)
+        menu.addAction("Group into One File…", self._group_selected)
+        ungroup = menu.addAction("Ungroup", self._ungroup_selected)
+        ungroup.setEnabled(self.ungroup_button.isEnabled())
+        menu.exec(self.preview.viewport().mapToGlobal(pos))
+
+    def _group_selected(self):
+        tracks = self._selected_tracks()
+        if len({p for p, _ in tracks}) > 1:
+            QMessageBox.information(self, "Group into one file", "Select tracks of one file only: a group "
+                                    "becomes one polywav made from one recording.")
+            return
+        if len(tracks) < 2:
+            QMessageBox.information(self, "Group into one file", "Select two or more tracks of a file first: "
+                                    "Ctrl-click (or Shift-click) the track names in the list, then group them.")
+            return
+        path = tracks[0][0]
+        channels = sorted(c for _, c in tracks)
+        rec = next(r for r in self.recs if r.path == path)
+        names = list(rec.tracks) + [""] * (rec.channels - len(rec.tracks))
+        suggested = "+".join(splitter.track_stem(names[c], c + 1) for c in channels)
+        name, ok = QInputDialog.getText(self, "Group into one file",
+                                        f"Name of the file for tracks {', '.join(str(c + 1) for c in channels)} "
+                                        "(without the extension):", text=suggested)
+        if not ok:
+            return
+        name = organize.safe_part(name.strip()) or suggested
+        self._remove_from_groups(path, set(channels))
+        self.groups[path].append((name, channels))
+        self.picked[path] |= set(channels)
+        self._update()
+
+    def _ungroup_selected(self):
+        by_path: dict[str, set[int]] = {}
+        for path, channel in self._selected_tracks():
+            by_path.setdefault(path, set()).add(channel)
+        for path, channels in by_path.items():
+            # Ungrouping one track of a group ungroups the whole group.
+            whole = {c for _, members in self.groups[path] if channels & set(members) for c in members}
+            self._remove_from_groups(path, whole)
+        self._update()
+
+    def _remove_from_groups(self, path: str, channels: set[int]):
+        kept = []
+        for name, members in self.groups[path]:
+            members = [c for c in members if c not in channels]
+            if len(members) >= 2:
+                kept.append((name, members))
+        self.groups[path] = kept
+
+    def _track_ticked(self, item: QTreeWidgetItem, column: int):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if column != 0 or not data or data[0] == "group":
+            return
+        path, channel = data
+        if item.checkState(0) == Qt.CheckState.Checked:
+            self.picked[path].add(channel)
+        else:
+            self.picked[path].discard(channel)
+        QTimer.singleShot(0, self._update)  # not while Qt is still in the item's change
+
+    def _update(self):
+        shrink = self.shrink.isChecked()
+        self.plan = splitter.plan_split(self.recs, self.family_of, keep=self.keep.isChecked(),
+                                        picked=self.picked, shrink=shrink, groups=self.groups)
+        partial = any(self.picked[p] != set(range(r.channels)) and self.picked[p]
+                      for r in self.recs if (p := r.path) in self.picked)
+        self.rest_box.setEnabled(partial)
+        self.keep.setEnabled(any(self.picked[r.path] == set(range(r.channels))
+                                 for r in self.recs if r.path in self.picked))
+        self.gone_box.setEnabled(bool(self.removed_originals()))
+        scroll = self.preview.verticalScrollBar().value()
+        self.preview.blockSignals(True)
+        self.preview.clear()
+        tops: dict[str, QTreeWidgetItem] = {}
+
+        def folder_item(folder: str) -> QTreeWidgetItem:
+            if folder not in tops:
+                top = QTreeWidgetItem([os.path.basename(folder) + "/",
+                                       "folder exists" if os.path.isdir(folder) else "new folder"])
+                top.setToolTip(0, folder)
+                self.preview.addTopLevelItem(top)
+                top.setExpanded(True)
+                tops[folder] = top
+            return tops[folder]
+
+        new_names = {(rec.path, c): os.path.basename(tf.dst) for rec, files in self.plan.splits
+                     for tf in files for c in tf.picks}
+        for rec in self.recs:
+            if rec.path not in self.picked:
+                continue
+            chosen = self.picked[rec.path]
+            rest = rec.channels - len(chosen)
+            gone = "is deleted permanently" if self.delete.isChecked() else f"goes to “{REMOVED_FOLDER}”"
+            if rec.path in self.plan.remainders:
+                fate = f"the original: shrunk to the {rest} track(s) not split off; the full file {gone}"
+            elif rec.path in self.plan.originals_in_folder:
+                fate = "the original, moved in" + (" (it keeps all its tracks)" if rest else "")
+            elif chosen:
+                fate = "the original " + gone
+            else:
+                fate = "not split (no tracks ticked)"
+            item = QTreeWidgetItem(folder_item(splitter.take_folder(rec)), [rec.name, fate])
+            item.setExpanded(True)
+            tracks = list(rec.tracks) + [""] * (rec.channels - len(rec.tracks))
+            group_items = {}
+            for index, (name, members) in enumerate(self.groups[rec.path]):
+                ticked = [c for c in members if c in chosen]
+                goes = new_names.get((rec.path, ticked[0]), "") if ticked else ""
+                group_items[members[0]] = (index, members, goes, len(ticked))
+            parent_of = {}
+            for channel in range(rec.channels):
+                if channel in group_items:  # the group's row goes where its first track is
+                    index, members, goes, count = group_items[channel]
+                    node = QTreeWidgetItem(item, [f"Group: {self.groups[rec.path][index][0]}",
+                                                  f"→ {goes} (one file, {count} track{'s' if count != 1 else ''})"
+                                                  if goes else "no tracks ticked"])
+                    node.setData(0, Qt.ItemDataRole.UserRole, ("group", rec.path, index))
+                    for c in members:
+                        parent_of[c] = node
+                on = channel in chosen
+                goes = new_names.get((rec.path, channel), "")
+                grouped = channel in parent_of
+                child = QTreeWidgetItem(parent_of.get(channel, item),
+                                        [f"{channel + 1}  {tracks[channel] or '(no name)'}",
+                                         ("in the group" if grouped else f"→ {goes}") if on and goes
+                                         else "stays with the original"])
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+                child.setData(0, Qt.ItemDataRole.UserRole, (rec.path, channel))
+        for rec, dst in self.plan.partners:
+            QTreeWidgetItem(folder_item(os.path.dirname(dst)), [rec.name, "the take's other file, moved in"])
+        self.preview.expandAll()
+        self.preview.blockSignals(False)
+        self.preview.verticalScrollBar().setValue(scroll)
+        self._selection_changed()
+
+        tracks = sum(len(files) for _, files in self.plan.splits)
+        lines = [f"{len(self.plan.splits):,} file(s) give {tracks:,} new file(s)"
+                 + (f", {len(self.plan.remainders):,} shrunk original(s)" if self.plan.remainders else "")
+                 + "."] if self.plan.splits else []
+        red = ERROR_COLOR.name()
+        if self.plan.problems:
+            lines.append(f"<span style='color:{red}'><b>Nothing can be split until this is sorted out:</b><br>"
+                         + "<br>".join(escape_html(p) for p in self.plan.problems) + "</span>")
+        skipped = [s for s in self.plan.skipped if not s.endswith("no tracks ticked")]
+        if skipped:
+            lines.append("Not split: " + "; ".join(escape_html(s) for s in skipped))
+        self.summary.setText("<br>".join(lines))
+        self.ok.setEnabled(bool(self.plan.splits) and not self.plan.problems)
+
+    def removed_originals(self) -> list[Recording]:
+        """The originals that leave (not kept, or shrunk)."""
+        return [r for r, _ in self.plan.splits if r.path not in self.plan.originals_in_folder]
+
+    def accept(self):
+        gone = self.removed_originals()
+        if gone and self.delete.isChecked() and not self.dangerous and not confirm_permanent_delete(self, gone):
+            return
+        settings.put(self.qsettings, "split_keep_original", self.keep.isChecked())
+        settings.put(self.qsettings, "split_shrink_original", self.shrink.isChecked())
+        settings.put(self.qsettings, "split_delete_permanently", self.delete.isChecked())
+        super().accept()
+
+
+class CombineDialog(QDialog):
+    """Choose the order and name for combining files of one take into a polywav."""
+
+    def __init__(self, recs: list[Recording], qsettings: QSettings, parent=None):
+        super().__init__(parent)
+        self.recs, self.qsettings = recs, qsettings
+        self.setWindowTitle("Combine into polywav")
+        intro = QLabel("The tracks of these files go into one polywav, in this order (drag, or use the "
+                       "buttons). It keeps the first file's metadata (scene, take, timecode, notes) and every "
+                       "file's track names.")
+        intro.setWordWrap(True)
+        self.list = QListWidget()
+        self.list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        for rec in recs:
+            tracks = ", ".join(t or "(no name)" for t in (list(rec.tracks) + [""] * rec.channels)[:rec.channels])
+            item = QListWidgetItem(f"{rec.name}    {rec.channels} track{'s' if rec.channels != 1 else ''}: {tracks}")
+            item.setData(Qt.ItemDataRole.UserRole, rec.path)
+            self.list.addItem(item)
+        up, down = QPushButton("Move Up"), QPushButton("Move Down")
+        up.clicked.connect(lambda: self._move(-1))
+        down.clicked.connect(lambda: self._move(1))
+        moves = QVBoxLayout()
+        moves.addWidget(up)
+        moves.addWidget(down)
+        moves.addStretch(1)
+        row = QHBoxLayout()
+        row.addWidget(self.list, 1)
+        row.addLayout(moves)
+        suggested = splitter.combined_name(recs)
+        # Only the name is editable; the extension stays the recordings' own.
+        self.ext = os.path.splitext(suggested)[1]
+        self.name = QLineEdit(os.path.splitext(suggested)[0])
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.name, 1)
+        name_row.addWidget(QLabel(self.ext))
+        folder = QLabel(f"In {recs[0].folder}")
+        folder.setEnabled(False)
+        folder.setWordWrap(True)
+        self.keep = QRadioButton("Keep the files as they are")
+        self.remove = QRadioButton(f"Move them to “{REMOVED_FOLDER}” (they can be put back)")
+        self.delete = QRadioButton("Delete them permanently (after the new file is written and checked; "
+                                   "can't be undone)")
+        self.dangerous = dangerous_mode(qsettings)
+        chosen = settings.get(qsettings, "combine_sources")
+        if chosen == "delete" and not self.dangerous:
+            chosen = "remove"  # safe mode never starts on a permanent delete
+        {"remove": self.remove, "delete": self.delete}.get(chosen, self.keep).setChecked(True)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        box, self.ok = _buttons(self, "Combine")
+        form = QFormLayout()
+        form.addRow("New file:", name_row)
+        form.addRow("", folder)
+        after = QGroupBox("Afterwards, the files combined:")
+        after_layout = QVBoxLayout(after)
+        after_layout.addWidget(self.keep)
+        after_layout.addWidget(self.remove)
+        after_layout.addWidget(self.delete)
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addLayout(row, 1)
+        layout.addLayout(form)
+        layout.addWidget(self.summary)
+        layout.addWidget(after)
+        if self.dangerous:
+            layout.addWidget(dangerous_label())
+        layout.addWidget(box)
+        self.resize(720, 480)
+        self.name.textChanged.connect(self._update)
+        self.list.model().rowsMoved.connect(self._update)
+        self._update()
+
+    def _move(self, step: int):
+        row = self.list.currentRow()
+        if row < 0 or not 0 <= row + step < self.list.count():
+            return
+        item = self.list.takeItem(row)
+        self.list.insertItem(row + step, item)
+        self.list.setCurrentRow(row + step)
+        self._update()
+
+    def ordered(self) -> list[Recording]:
+        by_path = {r.path: r for r in self.recs}
+        return [by_path[self.list.item(i).data(Qt.ItemDataRole.UserRole)] for i in range(self.list.count())]
+
+    def destination(self) -> str:
+        return compat.join(self.recs[0].folder, self.name.text().strip() + self.ext)
+
+    def _update(self):
+        problems = splitter.combine_problems(self.recs)
+        stem = self.name.text().strip()
+        name = stem + self.ext
+        error = validate_name(name) if stem else "type a name"
+        if error:
+            problems.append(f"New file: {error}")
+        elif os.path.lexists(self.destination()):
+            problems.append(f"{name} is already in that folder")
+        channels = sum(r.channels for r in self.recs)
+        if problems:
+            self.summary.setText(f"<span style='color:{ERROR_COLOR.name()}'><b>Can't combine:</b><br>"
+                                 + "<br>".join(escape_html(p) for p in problems) + "</span>")
+        else:
+            self.summary.setText(f"{len(self.recs)} files give one {channels}-track file.")
+        self.ok.setEnabled(not problems)
+
+    def accept(self):
+        if self.delete.isChecked() and not self.dangerous and not confirm_permanent_delete(self, self.recs):
+            return
+        settings.put(self.qsettings, "combine_sources", "remove" if self.remove.isChecked() else
+                     "delete" if self.delete.isChecked() else "keep")
+        super().accept()
+
+
 # ---------------------------------------------------------------- settings
 
 def human_bytes(n: float) -> str:
@@ -446,6 +865,9 @@ class SettingsDialog(QDialog):
         self.embedded.setChecked(settings.get(qsettings, "write_embedded_filename"))
         self.family = QCheckBox("Metadata edits include the take's other files (_ISO / _LR) by default")
         self.family.setChecked(settings.get(qsettings, "apply_to_take_family"))
+        self.scene_take = QCheckBox("Changing a scene or take in the Library table renames the file to match "
+                                    "(e.g. scene 8M, take 01 → 8MT01)")
+        self.scene_take.setChecked(settings.get(qsettings, "rename_on_scene_take"))
         self.confirm_undo = QCheckBox("Ask before undoing")
         self.confirm_undo.setChecked(settings.get(qsettings, "confirm_undo"))
         # The library index: reading and writing, for file metadata and waveforms.
@@ -482,6 +904,7 @@ class SettingsDialog(QDialog):
         form.addRow("", hint)
         form.addRow("", self.embedded)
         form.addRow("", self.family)
+        form.addRow("", self.scene_take)
         form.addRow("", self.confirm_undo)
         form.addRow("", clear)
         meta, waves = self._estimate()
@@ -510,10 +933,32 @@ class SettingsDialog(QDialog):
         index_hint.setWordWrap(True)
         index_hint.setEnabled(False)
         grid.addWidget(index_hint, 4, 0, 1, 3)
+        mode_box = QGroupBox("Split and combine: files that are replaced")
+        self.safe_mode = QRadioButton(f"Safe mode: the dialogs always start with moving them to “{REMOVED_FOLDER}” "
+                                      "(can be put back, Undo works). Deleting permanently can still be chosen "
+                                      "each time, and asks first.")
+        self.dangerous_mode = QRadioButton("Dangerous mode: your last choices are kept, including deleting "
+                                           "permanently, and files are deleted without asking. Deleted files "
+                                           "can't be brought back.")
+        self.dangerous_mode.setToolTip("For when you've settled on your choices in the Split and Combine windows")
+        (self.dangerous_mode if settings.get(qsettings, "safety_mode") == "dangerous" else
+         self.safe_mode).setChecked(True)
+        mode_layout = QVBoxLayout(mode_box)
+        for radio in (self.safe_mode, self.dangerous_mode):
+            # Long choices wrap in a label next to the button.
+            row = QHBoxLayout()
+            text = QLabel(radio.text())
+            text.setWordWrap(True)
+            text.mousePressEvent = lambda _e, r=radio: r.setChecked(True)
+            radio.setText("")
+            row.addWidget(radio, 0, Qt.AlignmentFlag.AlignTop)
+            row.addWidget(text, 1)
+            mode_layout.addLayout(row)
         box, _ = _buttons(self, "Save")
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(index_box)
+        layout.addWidget(mode_box)
         layout.addWidget(box)
         self.resize(640, self.sizeHint().height())
 
@@ -568,7 +1013,9 @@ class SettingsDialog(QDialog):
                      [line.strip() for line in self.containers.toPlainText().splitlines() if line.strip()])
         settings.put(self.qsettings, "write_embedded_filename", self.embedded.isChecked())
         settings.put(self.qsettings, "apply_to_take_family", self.family.isChecked())
+        settings.put(self.qsettings, "rename_on_scene_take", self.scene_take.isChecked())
         settings.put(self.qsettings, "confirm_undo", self.confirm_undo.isChecked())
+        settings.put(self.qsettings, "safety_mode", "dangerous" if self.dangerous_mode.isChecked() else "safe")
         settings.put(self.qsettings, "library_index_read", self.index_read.isChecked())
         settings.put(self.qsettings, "library_index", self.index.isChecked())
         settings.put(self.qsettings, "library_index_waveforms_read", self.index_waves_read.isChecked())

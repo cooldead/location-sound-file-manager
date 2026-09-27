@@ -233,3 +233,44 @@ class FindReplaceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SceneTakeNameTest(unittest.TestCase):
+    def test_sound_devices_names(self):
+        from sound_file_manager.renamer import scene_take_name, split_take_name
+        self.assertEqual(split_take_name("101AT01_ISO.wav"), ("101AT01", "_ISO", ".wav"))
+        self.assertEqual(split_take_name("8MT01.WAV"), ("8MT01", "", ".WAV"))
+        self.assertEqual(scene_take_name("101AT01_ISO.wav", "101A", "01", "101A", "02"), "101AT02_ISO.wav")
+        self.assertEqual(scene_take_name("101AT01_LR.wav", "101A", "01", "102", "01"), "102T01_LR.wav")
+        self.assertEqual(scene_take_name("8MT01_1.WAV", "8M", "01", "8M", "03"), "8MT03_1.WAV")  # mono split files
+
+    def test_style_kept_or_default(self):
+        from sound_file_manager.renamer import scene_take_name
+        self.assertEqual(scene_take_name("8M-T01.wav", "8M", "01", "8M", "02"), "8M-T02.wav")
+        self.assertEqual(scene_take_name("12_03.wav", "12", "03", "12", "04"), "12_04.wav")
+        # A name that isn't built from scene and take gets the Sound Devices style.
+        self.assertEqual(scene_take_name("POD00001.WAV", "", "", "4", "02"), "4T02.WAV")
+        self.assertEqual(scene_take_name("Anchor Audio.WAV", "1", "1", "2", "1"), "2T1.WAV")
+
+    def test_other_parts_of_the_name_are_kept(self):
+        from sound_file_manager.renamer import scene_take_name
+        self.assertEqual(scene_take_name("2BT001_BOOM.WAV", "2B", "001", "2B", "002"), "2BT002_BOOM.WAV")
+        self.assertEqual(scene_take_name("2B-T001_BOOM+BOOMSAFE.WAV", "2B", "001", "3", "001"),
+                         "3-T001_BOOM+BOOMSAFE.WAV")
+        self.assertEqual(scene_take_name("Day2_2BT001 alt.wav", "2B", "001", "2B", "004"), "Day2_2BT004 alt.wav")
+        self.assertEqual(scene_take_name("2BT001_LAV_ISO.wav", "2B", "001", "2B", "002"), "2BT002_LAV_ISO.wav")
+        # Not a match inside a longer number or word: the default style instead.
+        self.assertEqual(scene_take_name("2BT0012.wav", "2B", "001", "2B", "002"), "2BT002.wav")
+
+    def test_no_rename(self):
+        from sound_file_manager.renamer import scene_take_name
+        self.assertIsNone(scene_take_name("POD00001.WAV", "", "", "4", ""))  # take still empty
+        self.assertIsNone(scene_take_name("8MT01.wav", "8M", "01", "8M", "01"))
+        self.assertIsNone(scene_take_name("8MT01.wav", "8m", "01", "8M", "01"))  # same, only case: no rename
+
+    def test_partner_name(self):
+        from sound_file_manager.renamer import partner_name
+        self.assertEqual(partner_name("101AT01_LR.wav", "101AT01_ISO.wav", "101AT02_ISO.wav"), "101AT02_LR.wav")
+        self.assertIsNone(partner_name("101AT01_LR.wav", "101AT01_ISO.wav", "101AT02.wav"))  # ending dropped
+        self.assertIsNone(partner_name("99T01_LR.wav", "101AT01_ISO.wav", "101AT02_ISO.wav"))  # another take
+        self.assertIsNone(partner_name("101AT01_ISO.wav", "101AT01_ISO.wav", "101AT02_ISO.wav"))  # the file itself

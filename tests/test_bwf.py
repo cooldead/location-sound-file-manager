@@ -202,3 +202,20 @@ class WriteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RewriteHeadroomTest(unittest.TestCase):
+    def test_edits_after_a_rewrite_fit_in_place(self):
+        import tempfile
+        from sound_file_manager import bwf
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "POD00001.WAV")
+            make_wav(path, with_ixml=False, with_bext=False)
+            with self.assertRaises(bwf.NeedsRewrite):
+                bwf.update_metadata(path, {"scene": "4"})
+            bwf.update_metadata(path, {"scene": "4"}, allow_rewrite=True)
+            # No second copy of the file for the next edits: they fit in the room left.
+            bwf.update_metadata(path, {"take": "02", "note": "host intro " * 40}, filename="4T02.WAV")
+            info = bwf.read_info(path)
+            self.assertEqual((info.value("scene"), info.value("take")), ("4", "02"))
+            self.assertTrue(info.value("note").startswith("host intro"))

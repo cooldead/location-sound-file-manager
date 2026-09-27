@@ -262,3 +262,67 @@ def find_replace(text: str, find: str, replace: str, *, regex: bool = False, cas
     if case_sensitive:
         return text.replace(find, replace)
     return re.sub(re.escape(find), lambda _: replace, text, flags=flags)
+
+
+# ---------------------------------------------------------------- scene / take names
+
+# Endings a recorder adds after the take: Sound Devices _ISO / _LR (poly) and
+# _1, _2… (mono files of one take), a mix, or Zoom's _Tr1 / _TrLR.
+_TAKE_SUFFIX = re.compile(r"(_(?:ISO|LR|MIX|Tr[A-Za-z0-9]*|\d{1,2}))$", re.IGNORECASE)
+
+
+def split_take_name(name: str) -> tuple[str, str, str]:
+    """"101AT01_ISO.wav" -> ("101AT01", "_ISO", ".wav")."""
+    stem, ext = os.path.splitext(name)
+    match = _TAKE_SUFFIX.search(stem)
+    if match and match.start() > 0:
+        return stem[:match.start()], match.group(1), ext
+    return stem, "", ext
+
+
+def scene_take_name(name: str, old_scene: str, old_take: str, new_scene: str, new_take: str) -> str | None:
+    """The file name after its scene or take changed, or None when it keeps
+    its name (nothing changed, or the scene or take is empty).
+
+    The recorder's style is kept when the name was built from the old scene
+    and take ("8M-T01" stays "<scene>-T<take>"); otherwise it becomes the
+    Sound Devices style "<scene>T<take>". Endings such as _ISO / _LR and the
+    extension are kept, and so is anything else around the scene and take
+    ("2BT001_BOOM" -> "2BT002_BOOM"), so a take's files keep distinct names."""
+    new_scene, new_take = new_scene.strip(), new_take.strip()
+    if not new_scene or not new_take or (new_scene, new_take) == (old_scene.strip(), old_take.strip()):
+        return None
+    core, suffix, ext = split_take_name(name)
+    separator = "T"
+    if old_scene.strip() and old_take.strip():
+        pattern = rf"{re.escape(old_scene.strip())}([-_ ]?(?:T|TK|TAKE)?[-_ ]?){re.escape(old_take.strip())}"
+        # The whole name first: in "12_03" the "_03" is the take, not an ending.
+        whole = re.fullmatch(pattern, os.path.splitext(name)[0], re.IGNORECASE)
+        match = whole or re.fullmatch(pattern, core, re.IGNORECASE)
+        if match:
+            separator = match.group(1)
+            if whole:
+                suffix = ""
+        else:
+            # Scene and take inside a longer name: replace just them. Not in the
+            # middle of a word or a longer number ("2BT0012" isn't take 001).
+            stem = os.path.splitext(name)[0]
+            inside = re.search(rf"(?<![A-Za-z0-9]){pattern}(?!\d)", stem, re.IGNORECASE)
+            if inside:
+                new_name = f"{stem[:inside.start()]}{new_scene}{inside.group(1)}{new_take}{stem[inside.end():]}{ext}"
+                return None if new_name == name else new_name
+    new_name = f"{new_scene}{separator}{new_take}{suffix}{ext}"
+    return None if new_name == name else new_name
+
+
+def partner_name(partner: str, old_name: str, new_name: str) -> str | None:
+    """A take's other file (e.g. the _LR next to an _ISO) after the first one
+    was renamed: the same new name before its own ending. None when the two
+    names don't share their part before the ending, or nothing changes."""
+    old_core, old_suffix, _ = split_take_name(old_name)
+    new_core, new_suffix, _ = split_take_name(new_name)
+    core, suffix, ext = split_take_name(partner)
+    if core != old_core or new_suffix.lower() != old_suffix.lower() or suffix.lower() == old_suffix.lower():
+        return None
+    renamed = f"{new_core}{suffix}{ext}"
+    return None if renamed == partner else renamed
