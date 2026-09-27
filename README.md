@@ -6,13 +6,13 @@ A desktop app for Linux, macOS and Windows for browsing a library of production 
 
 | Platform | Release | Download |
 |---|---|---|
-| **Linux**: Arch, CachyOS, Manjaro | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `location-sound-file-manager-1.4.0-1-any.pkg.tar.zst`: install with `sudo pacman -U location-sound-file-manager-1.4.0-1-any.pkg.tar.zst` (pulls in PySide6, Qt Multimedia and numpy). Adds the app to the menu; remove it with `sudo pacman -R location-sound-file-manager`. |
-| **Linux**: any distribution | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-x86_64.AppImage`: everything inside (Python, Qt, numpy), nothing to install. Make it executable (`chmod +x`, or Properties ▸ Permissions) and open it. Needs a distribution from 2022 or later (glibc 2.35+). |
-| **Linux**: from source | [v1.4.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) | `Location-Sound-File-Manager-1.4.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). Or clone the repository. |
+| **Linux**: Arch, CachyOS, Manjaro | [v1.5.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-linux) | `location-sound-file-manager-1.5.0-1-any.pkg.tar.zst`: install with `sudo pacman -U location-sound-file-manager-1.5.0-1-any.pkg.tar.zst` (pulls in PySide6, Qt Multimedia and numpy). Adds the app to the menu; remove it with `sudo pacman -R location-sound-file-manager`. |
+| **Linux**: any distribution | [v1.5.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-linux) | `Location-Sound-File-Manager-1.5.0-x86_64.AppImage`: everything inside (Python, Qt, numpy), nothing to install. Make it executable (`chmod +x`, or Properties ▸ Permissions) and open it. Needs a distribution from 2022 or later (glibc 2.35+). |
+| **Linux**: from source | [v1.5.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-linux) | `Location-Sound-File-Manager-1.5.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). Or clone the repository. |
 | **macOS** (Apple silicon) | [v1.4.0 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-macos) | `Location-Sound-File-Manager-1.4.0-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
 | **Windows** 10 and 11 (64-bit) | [v1.4.0 for Windows](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-windows) | `Location-Sound-File-Manager-1.4.0-windows-x64.zip`: extract it anywhere and open **Location Sound File Manager.exe** in the extracted folder. Python, Qt and numpy are inside. It is not code-signed: Windows SmartScreen may warn the first time (More info ▸ Run anyway). |
 
-The Linux, Mac and Windows releases are built separately from the shared source. All the platform downloads above include the v1.4.0 features. You can also build the Mac or Windows app from source ([macOS](#macos), [Windows](#windows)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
+The Linux, Mac and Windows releases are built separately from the shared source. The Linux release is v1.5.0 (split and combine track files, editing in the Library table, the notes box); the Mac and Windows downloads are v1.4.0 and get these with their next build. You can also build the Mac or Windows app from source ([macOS](#macos), [Windows](#windows)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
 
 ## First run
 
@@ -112,13 +112,13 @@ Developed on CachyOS / KDE Plasma, Wayland. Needs Python 3.11+, PySide6 (Qt 6) w
 sudo pacman -S pyside6 qt6-multimedia qt6-multimedia-ffmpeg python-numpy
 ```
 
-The easiest way on Arch-based systems is the **Arch package** from the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux) (`sudo pacman -U …pkg.tar.zst`); on other distributions, the **AppImage**. If you used `./install.sh` before, delete `~/.local/share/applications/location-sound-file-manager.desktop` so the menu opens the installed version.
+The easiest way on Arch-based systems is the **Arch package** from the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-linux) (`sudo pacman -U …pkg.tar.zst`); on other distributions, the **AppImage**. If you used `./install.sh` before, delete `~/.local/share/applications/location-sound-file-manager.desktop` so the menu opens the installed version.
 
-To run it from the source instead, get the app, either the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-linux):
+To run it from the source instead, get the app, either the [Linux release](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-linux):
 
 ```sh
-tar xzf Location-Sound-File-Manager-1.4.0-linux.tar.gz
-cd location-sound-file-manager-1.4.0
+tar xzf Location-Sound-File-Manager-1.5.0-linux.tar.gz
+cd location-sound-file-manager-1.5.0
 ./install.sh               # adds it to the application menu
 ./run.sh [library-folder]  # or start it directly
 ```
