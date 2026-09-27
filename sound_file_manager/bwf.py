@@ -29,6 +29,7 @@ from . import compat
 
 BEXT_DESCRIPTION_SIZE = 256
 FILLER_CHUNKS = {b"JUNK", b"junk", b"PAD ", b"FLLR", b"filr"}
+REWRITE_IXML_HEADROOM = 4096  # spaces after the iXML document when a file is rewritten
 WAV_FORMS = (b"RIFF", b"RF64", b"BW64")
 _CHUNK_ID_RE = re.compile(rb"^[\x20-\x7e]{4}$")
 _BEXT_LINE_RE = re.compile(r"^([a-z])([A-Z0-9_]+)=(.*)$")
@@ -499,6 +500,9 @@ def _rewrite(path: str, layout: Layout, bext: Chunk | None, description: bytes |
     folder = os.path.dirname(path) or "."
     temp = compat.join(folder, f".sfm-tmp-{uuid.uuid4().hex}.wav")
     had_ixml = layout.first(b"iXML") is not None
+    # Room to grow, as recorders leave: later edits (a longer note, a new name)
+    # then fit in place instead of copying the whole file again.
+    new_ixml = new_ixml + b" " * REWRITE_IXML_HEADROOM
     ds64_new = None
     try:
         with open(path, "rb") as src, open(temp, "wb") as dst:

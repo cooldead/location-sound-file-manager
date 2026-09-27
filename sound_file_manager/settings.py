@@ -18,6 +18,7 @@ DEFAULTS: dict[str, object] = {
     "container_folders": ["SD_1", "SD_2", "833 BACK UPS"],
     "write_embedded_filename": True,  # renames also update the name stored inside the WAV
     "apply_to_take_family": True,     # metadata edits include the take's other files (_ISO/_LR)
+    "rename_on_scene_take": True,     # editing scene or take in the Library renames the file to match
     "organize_pattern": "{project}/{day}",
     "organize_remove_empty": True,
     "confirm_undo": True,

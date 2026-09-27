@@ -446,6 +446,9 @@ class SettingsDialog(QDialog):
         self.embedded.setChecked(settings.get(qsettings, "write_embedded_filename"))
         self.family = QCheckBox("Metadata edits include the take's other files (_ISO / _LR) by default")
         self.family.setChecked(settings.get(qsettings, "apply_to_take_family"))
+        self.scene_take = QCheckBox("Changing a scene or take in the Library table renames the file to match "
+                                    "(e.g. scene 8M, take 01 → 8MT01)")
+        self.scene_take.setChecked(settings.get(qsettings, "rename_on_scene_take"))
         self.confirm_undo = QCheckBox("Ask before undoing")
         self.confirm_undo.setChecked(settings.get(qsettings, "confirm_undo"))
         # The library index: reading and writing, for file metadata and waveforms.
@@ -482,6 +485,7 @@ class SettingsDialog(QDialog):
         form.addRow("", hint)
         form.addRow("", self.embedded)
         form.addRow("", self.family)
+        form.addRow("", self.scene_take)
         form.addRow("", self.confirm_undo)
         form.addRow("", clear)
         meta, waves = self._estimate()
@@ -568,6 +572,7 @@ class SettingsDialog(QDialog):
                      [line.strip() for line in self.containers.toPlainText().splitlines() if line.strip()])
         settings.put(self.qsettings, "write_embedded_filename", self.embedded.isChecked())
         settings.put(self.qsettings, "apply_to_take_family", self.family.isChecked())
+        settings.put(self.qsettings, "rename_on_scene_take", self.scene_take.isChecked())
         settings.put(self.qsettings, "confirm_undo", self.confirm_undo.isChecked())
         settings.put(self.qsettings, "library_index_read", self.index_read.isChecked())
         settings.put(self.qsettings, "library_index", self.index.isChecked())

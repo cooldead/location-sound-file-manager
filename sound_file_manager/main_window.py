@@ -13,11 +13,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, Qt, QTimer, QUrl
 from PySide6.QtGui import (
-    QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPixmap, QStandardItemModel,
+    QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QPixmap, QShortcut,
+    QStandardItemModel,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTableView, QTextBrowser, QToolBar, QToolButton,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QTableView, QTextBrowser, QToolBar, QToolButton,
     QTreeView,
     QVBoxLayout, QWidget,
 )
@@ -40,7 +41,9 @@ from .branding_dialog import BrandingDialog, SetupDialog
 from .duplicates_dialog import DuplicatesWindow
 from .removed_dialog import RemovedDialog
 from .report_dialog import ReportDialog, ReportGroup
-from .renamer import RenameError, RenameOp, apply_renames, remove_empty_dirs, undo_ops
+from .renamer import (
+    RenameError, RenameOp, apply_renames, partner_name, remove_empty_dirs, scene_take_name, undo_ops, validate_name,
+)
 from .workers import ScanThread, run_job
 
 APP_NAME = "Location Sound File Manager"
@@ -76,7 +79,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ UI
 
     def _build_ui(self):
-        self.model = RecordingsModel(self)
+        self.model = RecordingsModel(self, live_edit=True)
+        self.model.editRequested.connect(self.apply_cell_edit)
         self.proxy = RecordingsProxy(self)
         self.proxy.setSourceModel(self.model)
 
@@ -128,7 +132,9 @@ class MainWindow(QMainWindow):
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Double-click File, Scene, Take or Note to edit it (written at once, undoable);
+        # double-click ★ to circle a take; anything else plays.
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.verticalHeader().hide()
@@ -145,11 +151,47 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_menu)
         self.table.selectionModel().selectionChanged.connect(self._selection_changed)
-        self.table.doubleClicked.connect(lambda _index: self.player.toggle_play())
+        self.table.doubleClicked.connect(self._table_double_clicked)
 
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
         self.details.setMinimumWidth(240)
+        # Notes for the selected take, written into the file (and its _ISO/_LR partner).
+        self.note_edit = QPlainTextEdit()
+        self.note_edit.setPlaceholderText("Select a recording to add notes")
+        self.note_edit.setMinimumHeight(60)
+        self.note_edit.setToolTip("Written into the file's metadata (iXML NOTE) with Save Note or Ctrl+Enter")
+        self.note_edit.textChanged.connect(self._note_edited)
+        self.note_save = QPushButton("Save Note")
+        self.note_save.setToolTip("Write the note into the file (Ctrl+Enter)")
+        self.note_save.clicked.connect(self.save_note)
+        self.note_revert = QPushButton("Revert")
+        self.note_revert.clicked.connect(self._load_note)
+        QShortcut(QKeySequence("Ctrl+Return"), self.note_edit, self.save_note,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        QShortcut(QKeySequence("Ctrl+Enter"), self.note_edit, self.save_note,
+                  context=Qt.ShortcutContext.WidgetShortcut)
+        self._note_rec: Recording | None = None
+        note_buttons = QHBoxLayout()
+        note_buttons.setContentsMargins(0, 0, 0, 0)
+        note_buttons.addStretch(1)
+        note_buttons.addWidget(self.note_revert)
+        note_buttons.addWidget(self.note_save)
+        self.note_label = QLabel("<b>Notes</b>")
+        notes = QWidget()
+        notes_layout = QVBoxLayout(notes)
+        notes_layout.setContentsMargins(0, 4, 0, 0)
+        notes_layout.addWidget(self.note_label)
+        notes_layout.addWidget(self.note_edit, 1)
+        notes_layout.addLayout(note_buttons)
+        # Details above, notes below; drag the divider to give either more room.
+        inspector = QSplitter(Qt.Orientation.Vertical)
+        inspector.addWidget(self.details)
+        inspector.addWidget(notes)
+        inspector.setStretchFactor(0, 1)
+        inspector.setChildrenCollapsible(False)
+        inspector.setSizes([520, 200])
+        self._set_note_rec(None)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText(f"Search name, scene, take, note, track, timecode…  ({keys('Ctrl+F')})")
@@ -171,7 +213,7 @@ class MainWindow(QMainWindow):
         self.h_split = QSplitter(Qt.Orientation.Horizontal)
         self.h_split.addWidget(tree_panel)
         self.h_split.addWidget(middle)
-        self.h_split.addWidget(self.details)
+        self.h_split.addWidget(inspector)
         self.h_split.setStretchFactor(0, 0)
         self.h_split.setStretchFactor(1, 1)
         self.h_split.setStretchFactor(2, 0)
@@ -647,6 +689,7 @@ class MainWindow(QMainWindow):
             self._current_path = None
             self.player.load(None)
         self._show_details(rec if rec is not None else None, len(recs))
+        self._set_note_rec(rec)
         self._update_actions()
         self._update_status()
 
@@ -749,6 +792,141 @@ class MainWindow(QMainWindow):
                 html.append(f"<tr><td style='color:gray;padding-right:8px'>{i}</td><td>{escape(name)}</td></tr>")
             html.append("</table>")
         self.details.setHtml("".join(html))
+
+    # ------------------------------------------------------------ editing in the table / inspector
+
+    def _table_double_clicked(self, index: QModelIndex):
+        """Editable cells open an editor (and never get here); ★ circles the
+        take; anything else plays."""
+        if index.column() == COL["★"]:
+            rec = index.data(REC_ROLE)
+            if rec is not None and not rec.error:
+                self.apply_cell_edit(rec, "circled", not rec.circled)
+            return
+        self.player.toggle_play()
+
+    def _take_partners(self, rec: Recording) -> list[Recording]:
+        """The take's other files (_ISO / _LR) when edits include them."""
+        if not settings.get(self.qsettings, "apply_to_take_family"):
+            return []
+        return [r for r in catalog.family_members(rec, self.model.recs) if not r.error]
+
+    def apply_cell_edit(self, rec: Recording, key: str, value) -> None:
+        """Write one edit from the table or the notes box at once (undoable).
+        Scene / take changes rename the file to match (a setting), and the
+        take's other files get the same change."""
+        row = self.model.row_of(rec.path)
+        if row is None:
+            return
+        rec = self.model.recs[row]
+        partners = self._take_partners(rec)
+        embed = settings.get(self.qsettings, "write_embedded_filename")
+        if key == "name":
+            pairs = [(rec, value)] + [(r, n) for r in partners if (n := partner_name(r.name, rec.name, value))]
+            if self._check_new_names(pairs, "rename"):
+                label = f"rename of {rec.name}" + _and_partners([r for r, _ in pairs[1:]])
+                self.do_renames([(r, Path(r.path).with_name(n)) for r, n in pairs], embed=embed, label=label)
+            return
+        targets = [rec] + partners
+        changes = {key: value}
+        renames: list[tuple[Recording, str]] = []
+        if key in ("scene", "take") and settings.get(self.qsettings, "rename_on_scene_take"):
+            for r in targets:
+                new_scene = value if key == "scene" else r.scene
+                new_take = value if key == "take" else r.take
+                name = scene_take_name(r.name, r.scene, r.take, new_scene, new_take)
+                if name:
+                    renames.append((r, name))
+            if renames and not self._check_new_names(renames, key):
+                return
+        what = {"note": "note", "circled": "circle", "scene": "scene", "take": "take"}[key]
+        label = f"{what} of {rec.name}" + _and_partners(partners)
+        old_values = [(r.path, _values_of(r, changes)) for r in targets]
+        done = self.do_metadata([(r, changes) for r in targets], title="Writing metadata")
+        if not done:
+            return
+        metadata_part = {"kind": "metadata", "label": label,
+                         "entries": [(path, values) for path, values in old_values if path in done]}
+        self._log("metadata", changes=changes, files=sorted(done))
+        renames = [(r, n) for r, n in renames if r.path in done]
+        rename_part = None
+        if renames:
+            # The files were read again after the write: rename the current rows.
+            current = [(self.model.recs[self.model.row_of(r.path)], n) for r, n in renames
+                       if self.model.row_of(r.path) is not None]
+            rename_part = self.do_renames([(r, Path(r.path).with_name(n)) for r, n in current], embed=embed,
+                                          label=label, push_undo=False)
+        if rename_part is not None:
+            self._push_undo({"kind": "compound", "label": label, "parts": [metadata_part, rename_part]})
+            self.statusBar().showMessage(
+                "Renamed " + ", ".join(f"{r.name} → {n}" for r, n in renames) + f"  ({keys('Ctrl+Z')} undoes)", 10000)
+        else:
+            self._push_undo(metadata_part)
+
+    def _check_new_names(self, pairs: list[tuple[Recording, str]], what: str) -> bool:
+        """New names must be valid and free (also among themselves); says why not."""
+        problems, seen = [], set()
+        for r, name in pairs:
+            error = validate_name(name)
+            target = compat.join(r.folder, name)
+            if error:
+                problems.append(f"{name}: {error}")
+            elif target in seen or (os.path.exists(target) and target.casefold() != r.path.casefold()):
+                problems.append(f"{name}: a file with that name is already in {os.path.basename(r.folder)}")
+            seen.add(target)
+        if problems:
+            QMessageBox.warning(self, APP_NAME, f"Nothing was changed. The {what} would give "
+                                + ("this name, which can't be used:" if len(problems) == 1 else
+                                   "names that can't be used:") + "\n\n" + "\n".join(problems))
+            return False
+        return True
+
+    # Notes box (under the inspector)
+
+    def _set_note_rec(self, rec: Recording | None) -> None:
+        """Show the note of the selected recording, first offering to save an
+        unsaved note of the previous one."""
+        previous = self._note_rec
+        if previous is not None and rec is not None and previous.path == rec.path:
+            self._note_rec = rec
+            if not self.note_save.isEnabled():  # nothing typed: show what the file says now
+                self._load_note()
+            return
+        if previous is not None and self.note_save.isEnabled() and self.model.row_of(previous.path) is not None:
+            answer = QMessageBox.question(
+                self, "Unsaved note", f"Save the note you typed for {previous.name}?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard, QMessageBox.StandardButton.Save)
+            if answer == QMessageBox.StandardButton.Save:
+                self._note_rec = None
+                self.apply_cell_edit(previous, "note", self.note_edit.toPlainText().strip())
+        self._note_rec = rec if rec is not None and not rec.error else None
+        usable = self._note_rec is not None
+        self.note_edit.setEnabled(usable)
+        self.note_edit.setPlaceholderText("Notes for this take…" if usable else "Select one recording to add notes")
+        self.note_label.setText(f"<b>Notes</b> · {escape(rec.name)}" if usable else "<b>Notes</b>")
+        self._load_note()
+
+    def _load_note(self) -> None:
+        self.note_edit.blockSignals(True)
+        self.note_edit.setPlainText(self._note_rec.note if self._note_rec is not None else "")
+        self.note_edit.blockSignals(False)
+        self._note_edited()
+
+    def _note_edited(self) -> None:
+        rec = self._note_rec
+        dirty = rec is not None and self.note_edit.toPlainText().strip() != rec.note.strip()
+        self.note_save.setEnabled(dirty)
+        self.note_revert.setEnabled(dirty)
+
+    def save_note(self) -> None:
+        rec = self._note_rec
+        if rec is None or not self.note_save.isEnabled():
+            return
+        self.apply_cell_edit(rec, "note", self.note_edit.toPlainText().strip())
+        row = self.model.row_of(rec.path)
+        if row is not None:
+            self._note_rec = self.model.recs[row]
+        self._load_note()
 
     # ------------------------------------------------------------ menus
 
@@ -1140,8 +1318,9 @@ class MainWindow(QMainWindow):
                         remove_empty=dialog.remove_empty.isChecked())
 
     def do_renames(self, pairs: list[tuple[Recording, Path]], *, embed: bool, label: str,
-                   remove_empty: bool = False):
-        """The single entry point for renames and moves."""
+                   remove_empty: bool = False, push_undo: bool = True) -> dict | None:
+        """The single entry point for renames and moves. Returns the undo step
+        (pushed unless push_undo is False, for a caller that combines steps)."""
         ops = [RenameOp(Path(rec.path), dst) for rec, dst in pairs]
         released = self._release_player({compat.fwd(op.src) for op in ops})
         root = self.root
@@ -1168,14 +1347,17 @@ class MainWindow(QMainWindow):
             self._restore_player(released, {})
             QMessageBox.warning(self, APP_NAME, f"Nothing was changed:\n{error}"
                                 if isinstance(error, RenameError) else f"Failed: {error}")
-            return
+            return None
         applied, created, removed_dirs, removed_markers, embed_errors = result
         mapping = {compat.fwd(op.src): compat.fwd(op.dst) for op in applied}
         self._refresh_moved(mapping, reread=embed)
         self._restore_player(released, mapping)
+        entry = None
         if applied:
-            self._push_undo({"kind": "rename", "label": label, "applied": applied, "created": created,
-                             "removed_dirs": removed_dirs, "removed_markers": removed_markers, "embed": embed})
+            entry = {"kind": "rename", "label": label, "applied": applied, "created": created,
+                     "removed_dirs": removed_dirs, "removed_markers": removed_markers, "embed": embed}
+            if push_undo:
+                self._push_undo(entry)
             self._log("rename" if not remove_empty else "move",
                       files=[[compat.fwd(op.src), compat.fwd(op.dst)] for op in applied], embedded_name=embed)
         verb = "Moved" if remove_empty else "Renamed"
@@ -1186,6 +1368,7 @@ class MainWindow(QMainWindow):
             show_report(self, verb, summary + " Some names inside the files could not be updated:", embed_errors)
         else:
             self.statusBar().showMessage(summary, 8000)
+        return entry
 
     def _undo_renames(self, entry):
         reverse = undo_ops(entry["applied"])
@@ -1925,6 +2108,13 @@ class MainWindow(QMainWindow):
         if row is not None:
             self._current_path = path
             self.player.load(self.model.recs[row], position)
+
+
+def _and_partners(partners: list[Recording]) -> str:
+    """" and 101AT01_LR.wav" for undo labels."""
+    if not partners:
+        return ""
+    return f" and {partners[0].name}" if len(partners) == 1 else f" and {len(partners)} other files of the take"
 
 
 def _values_of(rec: Recording, changes: dict) -> dict:

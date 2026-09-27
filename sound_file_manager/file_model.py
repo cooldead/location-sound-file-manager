@@ -39,12 +39,17 @@ def _natural(text: str):
 class RecordingsModel(QAbstractTableModel):
     """The recordings table. With editable=True (the Offload review), File,
     Scene, Take, Note and ★ can be changed in place; those changes are kept
-    as *pending* edits per path (nothing is written) and shown highlighted."""
+    as *pending* edits per path (nothing is written) and shown highlighted.
+    With live_edit=True (the Library) the same cells can be edited, but each
+    edit is handed to editRequested(rec, key, value) to be written at once;
+    the row changes when the file has been rewritten and read back."""
 
     pendingChanged = Signal()
+    editRequested = Signal(object, str, object)  # Recording, "name"/"scene"/"take"/"note"/"circled", value
 
-    def __init__(self, parent=None, editable: bool = False):
+    def __init__(self, parent=None, editable: bool = False, live_edit: bool = False):
         super().__init__(parent)
+        self.live_edit = live_edit
         self.recs: list[Recording] = []
         self.root = ""
         self.editable = editable
@@ -97,7 +102,7 @@ class RecordingsModel(QAbstractTableModel):
 
     def flags(self, index):
         flags = super().flags(index)
-        if self.editable and index.isValid() and COLUMNS[index.column()][0] in EDITABLE_COLUMNS \
+        if (self.editable or self.live_edit) and index.isValid() and COLUMNS[index.column()][0] in EDITABLE_COLUMNS \
                 and not self.recs[index.row()].error:
             flags |= Qt.ItemFlag.ItemIsEditable
         return flags
@@ -118,6 +123,10 @@ class RecordingsModel(QAbstractTableModel):
                 value += ext
             if "/" in value or "\0" in value:
                 return False
+        if self.live_edit:
+            if value != (rec.name if key == "name" else getattr(rec, key)):
+                self.editRequested.emit(rec, key, value)
+            return False  # the row shows the new value once the file is written and read back
         self.set_pending(rec, key, value)
         return True
 
