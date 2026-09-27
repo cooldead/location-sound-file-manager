@@ -251,3 +251,9 @@
 **Safe / Dangerous mode** (asked: save those choices so they don't have to be made every time, as a dangerous vs safe mode): Settings → *Split and combine: files that are replaced*. Verified offscreen: safe mode never starts on delete and confirms; dangerous mode starts on the remembered delete and doesn't ask.
 
 **Scene/take renames keep the rest of the name** (asked: `2BT001_BOOM` with take 002 → `2BT002_BOOM`, so a take's files don't clash): `scene_take_name` replaces the scene+take found inside the name. Verified: renamer tests; offscreen take edit on three files of one take, then Undo.
+
+## 2026-09-27: macOS build of 1.5.0
+
+Pulled the Linux 1.5.0 work (split/combine, table edits, notes box, Undo crash fix, Windows port) onto the Mac. No Mac-specific code was needed: the new modules are plain Python/numpy, and `compat.py` leaves macOS on the `os` functions. Only UI text: the notes box tooltip showed "Ctrl+Enter" (now `keys()`, ⌘↵) and the Split dialog's hints said "Ctrl-click", which on a Mac is ⌘-click (`dialogs.MULTI_CLICK`).
+
+**Verified on macOS** (Apple silicon): 178 unit tests; an offscreen GUI script on scratch files: split (track levels checked), Undo through the confirmation box with "Don't ask again" (the crash), split → combine (sample-identical to the original) → Undo twice, a scene edit in the table renaming the file (iXML and bext), a note from the notes box, Undo of both. Then the built `.app` was launched and checked.

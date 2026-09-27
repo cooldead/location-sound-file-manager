@@ -7,6 +7,7 @@ import gzip
 import json
 import os
 import shutil
+import sys
 import time
 from html import escape as escape_html
 from pathlib import Path
@@ -23,6 +24,9 @@ from . import compat, library_index, organize, settings, splitter, waveform
 from .catalog import REMOVED_FOLDER
 from .catalog import Recording
 from .renamer import validate_name
+
+# The key for adding to a list selection: Command on a Mac.
+MULTI_CLICK = "⌘-click" if sys.platform == "darwin" else "Ctrl-click"
 
 ERROR_COLOR = QColor("#d13438")
 MAX_PREVIEW_ROWS = 5000
@@ -462,7 +466,7 @@ class SplitDialog(QDialog):
         self.preview.itemSelectionChanged.connect(self._selection_changed)
         self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.preview.customContextMenuRequested.connect(self._track_menu)
-        self.group_hint = QLabel("To put tracks into one polywav: select them (Ctrl- or Shift-click the track "
+        self.group_hint = QLabel(f"To put tracks into one polywav: select them ({MULTI_CLICK} or Shift-click the track "
                                  "names), then <i>Group into One File…</i> (or right-click).")
         self.group_hint.setWordWrap(True)
         self.group_hint.setEnabled(False)
@@ -561,7 +565,7 @@ class SplitDialog(QDialog):
             return
         if len(tracks) < 2:
             QMessageBox.information(self, "Group into one file", "Select two or more tracks of a file first: "
-                                    "Ctrl-click (or Shift-click) the track names in the list, then group them.")
+                                    f"{MULTI_CLICK} (or Shift-click) the track names in the list, then group them.")
             return
         path = tracks[0][0]
         channels = sorted(c for _, c in tracks)

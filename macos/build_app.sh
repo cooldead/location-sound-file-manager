@@ -7,8 +7,8 @@ set -e
 here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
 name="Location Sound File Manager"
-version="$(git describe --tags --abbrev=0 2>/dev/null | sed -E 's/^v//; s/-(linux|macos)$//')"
-version="${version:-1.4.0}"
+version="$(git describe --tags --abbrev=0 2>/dev/null | sed -E 's/^v//; s/-(linux|macos|windows)$//')"
+version="${version:-1.5.0}"
 build="$here/build/macos"
 
 # A private venv, so the system/Homebrew Python stays untouched.
