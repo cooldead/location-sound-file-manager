@@ -230,3 +230,24 @@
 
 **32-bit float:** parsing and decoding existed; added over-0 dBFS marks on the waveform, a NaN/infinity guard, a float WAV writer for tests and `tests/test_float.py`. Checked on a real Deity PR-2 file (80 min mono, peaks at +0.7 dBFS).
 
+## 2026-09-27: Undo crash, split into track files
+
+**Undo crash** (reported: rename a take, click Undo, the app quits): the core dumps showed a segfault inside the confirmation box ("Undo …? / Don't ask again"). The checkbox was passed as a temporary, and PySide doesn't give it to the box, so it was deleted at once and the box used a dead pointer. Reproduced offscreen (crash in `checkBox()` after `exec()`); fixed by keeping a reference. It happened with any undo while the confirmation was on, not just renames.
+
+**Split into track files:** requested as "split wavs into files adopting track names into a folder with the scene and take name", with the option to keep the original by moving it into that folder. `splitter.py` + `SplitDialog` + `MainWindow.split_selected`; see CLAUDE.md for the metadata details. Decisions: the take's `_ISO`/`_LR` partner moves into the folder too (takes stay together); an original that isn't kept goes to `_Removed Duplicates` (undoable) rather than being deleted; track files aren't renamed by scene/take edits.
+
+**Verified:** 171 unit tests (7 new in `tests/test_splitter.py`: sample-exact channels for 24-bit and float, metadata, odd frame counts, names, partners, clashes, RF64 header); offscreen GUI script: take edit + Undo through the confirmation box, split keeping the original, scene edit on a track file, undo; split without keeping, undo.
+
+**Choose the tracks** (asked right after: "allow me to select which tracks are split off and which stay with the original file", then "have options for both"): each track has a tick in the Split dialog. The unticked tracks stay with the original, either kept whole (it moves into the take folder unchanged) or shrunk to those tracks (rewritten under its name in the take folder; the full file goes to `_Removed Duplicates`, so it can be put back and Undo restores it). Verified: 9 splitter tests (shrunk original sample-exact, TRK renumbering); offscreen script ticking tracks through the tree for both options, then Undo.
+
+**Group tracks into one polywav** (asked next): select tracks in the Split dialog and *Group into One File…* (name suggested as `LAV1+LAV2`); ungrouped ticked tracks stay mono. Group files keep their tracks' iXML entries renumbered, and scene/take edits don't rename them (`is_track_file`). Verified: 10 splitter tests; offscreen script grouping three of four tracks, a take edit on the group file, Undo.
+
+**Combine into polywav** (asked after the user looked for grouping with split mono files selected in the Library): select files of one take, set the order and name, keep or remove the sources. Refuses files that don't line up (length, rate, bits, format, timecode). Verified: combining split files gives back sample-identical audio, and a reordered combine follows the order (12 splitter tests); offscreen script split → combine (keep and remove) → Undo. Note for GUI scripts: with a card inserted the window opens on the Offload page, where Library actions are disabled; call `set_page("library")`.
+
+**Combine name:** the default now starts with the scene and take (asked by the user), `2B-T001_BOOM+LAV.WAV` when the plain name is taken.
+
+**Delete permanently** (asked: instead of moving files to the removed folder): an option in Split (originals that leave) and Combine (the files combined), with a confirmation listing the files; deletion happens after the new files check out, and there is no undo step for it. Verified offscreen: cancelling the confirmation changes nothing; split + delete and combine + delete leave only the new files and no undo.
+
+**Safe / Dangerous mode** (asked: save those choices so they don't have to be made every time, as a dangerous vs safe mode): Settings → *Split and combine: files that are replaced*. Verified offscreen: safe mode never starts on delete and confirms; dangerous mode starts on the remembered delete and doesn't ask.
+
+**Scene/take renames keep the rest of the name** (asked: `2BT001_BOOM` with take 002 → `2BT002_BOOM`, so a take's files don't clash): `scene_take_name` replaces the scene+take found inside the name. Verified: renamer tests; offscreen take edit on three files of one take, then Undo.

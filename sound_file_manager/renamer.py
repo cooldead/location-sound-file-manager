@@ -287,7 +287,8 @@ def scene_take_name(name: str, old_scene: str, old_take: str, new_scene: str, ne
     The recorder's style is kept when the name was built from the old scene
     and take ("8M-T01" stays "<scene>-T<take>"); otherwise it becomes the
     Sound Devices style "<scene>T<take>". Endings such as _ISO / _LR and the
-    extension are kept."""
+    extension are kept, and so is anything else around the scene and take
+    ("2BT001_BOOM" -> "2BT002_BOOM"), so a take's files keep distinct names."""
     new_scene, new_take = new_scene.strip(), new_take.strip()
     if not new_scene or not new_take or (new_scene, new_take) == (old_scene.strip(), old_take.strip()):
         return None
@@ -302,6 +303,14 @@ def scene_take_name(name: str, old_scene: str, old_take: str, new_scene: str, ne
             separator = match.group(1)
             if whole:
                 suffix = ""
+        else:
+            # Scene and take inside a longer name: replace just them. Not in the
+            # middle of a word or a longer number ("2BT0012" isn't take 001).
+            stem = os.path.splitext(name)[0]
+            inside = re.search(rf"(?<![A-Za-z0-9]){pattern}(?!\d)", stem, re.IGNORECASE)
+            if inside:
+                new_name = f"{stem[:inside.start()]}{new_scene}{inside.group(1)}{new_take}{stem[inside.end():]}{ext}"
+                return None if new_name == name else new_name
     new_name = f"{new_scene}{separator}{new_take}{suffix}{ext}"
     return None if new_name == name else new_name
 

@@ -252,6 +252,16 @@ class SceneTakeNameTest(unittest.TestCase):
         self.assertEqual(scene_take_name("POD00001.WAV", "", "", "4", "02"), "4T02.WAV")
         self.assertEqual(scene_take_name("Anchor Audio.WAV", "1", "1", "2", "1"), "2T1.WAV")
 
+    def test_other_parts_of_the_name_are_kept(self):
+        from sound_file_manager.renamer import scene_take_name
+        self.assertEqual(scene_take_name("2BT001_BOOM.WAV", "2B", "001", "2B", "002"), "2BT002_BOOM.WAV")
+        self.assertEqual(scene_take_name("2B-T001_BOOM+BOOMSAFE.WAV", "2B", "001", "3", "001"),
+                         "3-T001_BOOM+BOOMSAFE.WAV")
+        self.assertEqual(scene_take_name("Day2_2BT001 alt.wav", "2B", "001", "2B", "004"), "Day2_2BT004 alt.wav")
+        self.assertEqual(scene_take_name("2BT001_LAV_ISO.wav", "2B", "001", "2B", "002"), "2BT002_LAV_ISO.wav")
+        # Not a match inside a longer number or word: the default style instead.
+        self.assertEqual(scene_take_name("2BT0012.wav", "2B", "001", "2B", "002"), "2BT002.wav")
+
     def test_no_rename(self):
         from sound_file_manager.renamer import scene_take_name
         self.assertIsNone(scene_take_name("POD00001.WAV", "", "", "4", ""))  # take still empty

@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, compat, duplicates, offload, settings
+from . import bwf, catalog, compat, duplicates, offload, settings, splitter
 from .offload import human_size
 from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
 from .dialogs import (
-    BatchRenameDialog, MetadataDialog, OrganizeDialog, RenameDialog, RewriteDialog, SettingsDialog, show_report,
+    BatchRenameDialog, MetadataDialog, OrganizeDialog, RenameDialog, RewriteDialog, SettingsDialog, SplitDialog, CombineDialog,
+    show_report,
 )
 from .file_model import (
     COL, COLUMNS, DAY_ROLE, NO_PROJECT, PERIOD_ROLE, PROJECT_ROLE, REC_ROLE, RECORDER_ROLE, RecordingsModel,
@@ -278,6 +279,12 @@ class MainWindow(QMainWindow):
                                          "Edit project, scene, take, tape, note and circled")
         self.act_organize = self._action("Reorganize into Folders…", self.organize_selected, "Ctrl+Shift+M",
                                          "folder-new", "Preview and move files into project folders")
+        self.act_split = self._action("Split into Track Files…", self.split_selected, None, "edit-cut",
+                                      "Make one mono file per track, named after the track, in a folder "
+                                      "named after the take")
+        self.act_combine = self._action("Combine into Polywav…", self.combine_selected, None, "insert-link",
+                                        "Put the tracks of files of one take (e.g. split mono files) into one "
+                                        "polywav")
         self.act_duplicates = self._action("Find Duplicates…", self.find_duplicates, "Ctrl+D", "edit-find",
                                            "Find duplicate recordings and duplicate projects, and merge or "
                                            "remove them")
@@ -375,7 +382,7 @@ class MainWindow(QMainWindow):
         self._update_brand()
         self.library_actions = [self.act_folder, self.act_rescan, self.act_rename, self.act_metadata,
                                 self.act_duplicates,
-                                self.act_organize, self.act_undo, self.act_report, self.act_open_project,
+                                self.act_organize, self.act_split, self.act_combine, self.act_undo, self.act_report, self.act_open_project,
                                 self.act_circled, self.act_export, self.act_open_folder, self.act_copy_path,
                                 self.act_search]
         self._update_actions()
@@ -742,6 +749,8 @@ class MainWindow(QMainWindow):
         self.act_rename.setText("Rename…" if len(recs) <= 1 else f"Rename {len(recs)} Files…")
         self.act_metadata.setEnabled(bool(ok))
         self.act_organize.setEnabled(bool(recs))
+        self.act_split.setEnabled(any(splitter.splittable(r) is None for r in recs))
+        self.act_combine.setEnabled(len(ok) >= 2)
         self.act_open_folder.setEnabled(len(recs) >= 1)
         self.act_copy_path.setEnabled(bool(recs))
         for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search,
@@ -832,6 +841,8 @@ class MainWindow(QMainWindow):
         renames: list[tuple[Recording, str]] = []
         if key in ("scene", "take") and settings.get(self.qsettings, "rename_on_scene_take"):
             for r in targets:
+                if splitter.is_track_file(r):
+                    continue  # named after its track (a split take), not after the scene and take
                 new_scene = value if key == "scene" else r.scene
                 new_take = value if key == "take" else r.take
                 name = scene_take_name(r.name, r.scene, r.take, new_scene, new_take)
@@ -939,7 +950,7 @@ class MainWindow(QMainWindow):
         play.triggered.connect(self.player.toggle_play)
         play.setEnabled(len(recs) == 1)
         menu.addSeparator()
-        for action in (self.act_rename, self.act_metadata, self.act_organize):
+        for action in (self.act_rename, self.act_metadata, self.act_organize, self.act_split, self.act_combine):
             menu.addAction(action)
         family = self._family_of(recs)
         if family:
@@ -1262,10 +1273,13 @@ class MainWindow(QMainWindow):
         if settings.get(self.qsettings, "confirm_undo"):
             box = QMessageBox(QMessageBox.Icon.Question, "Undo", f"Undo {entry['label']}?",
                               QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
-            box.setCheckBox(QCheckBox("Don't ask again"))
+            # Keep a reference: PySide doesn't hand the checkbox to the box, so a
+            # temporary one is deleted at once and the box crashes using it.
+            dont_ask = QCheckBox("Don't ask again")
+            box.setCheckBox(dont_ask)
             if box.exec() != QMessageBox.StandardButton.Yes:
                 return
-            if box.checkBox().isChecked():
+            if dont_ask.isChecked():
                 settings.put(self.qsettings, "confirm_undo", False)
         self.undo_stack.pop()
         parts = entry["parts"] if entry["kind"] == "compound" else [entry]
@@ -1316,6 +1330,153 @@ class MainWindow(QMainWindow):
             return
         self.do_renames([(m.rec, m.dst) for m in moves], embed=False, label=f"move of {len(moves):,} files",
                         remove_empty=dialog.remove_empty.isChecked())
+
+    def split_selected(self):
+        """Split multi-track files into one file per track. The original is
+        kept in the take folder, moved to the removed folder (undoable) or
+        deleted permanently (then there is no undo step)."""
+        recs = self.selected_recordings()
+        if not recs:
+            return
+        dialog = SplitDialog(recs, lambda r: catalog.family_members(r, self.model.recs), self.qsettings, self)
+        if not dialog.exec():
+            return
+        plan, root = dialog.plan, self.root
+        if not plan.splits or plan.problems:
+            return
+        delete = dialog.delete.isChecked()
+        leaving = [r for r, _ in plan.splits if r.path not in plan.originals_in_folder]
+        originals = [(r, plan.kept_path(r)) for r, _ in plan.splits if r.path in plan.originals_in_folder]
+        if not delete:
+            originals += [(r, duplicates.removal_path(r.path, root, r.project)) for r in leaving]
+        to_delete = [r.path for r in leaving] if delete else []
+        moves = [RenameOp(Path(r.path), Path(dst)) for r, dst in originals + plan.partners]
+        new_folders = [folder for folder in plan.folders if not os.path.isdir(folder)]
+        released = self._release_player({r.path for r, _ in originals + plan.partners} | set(to_delete))
+        total = sum(r.frames * r.channels * (r.bits // 8) for r, _ in plan.splits) or 1
+        mb = 1 << 20
+
+        def work(job):
+            written, base = [], 0
+            try:
+                for rec, files in plan.splits:
+                    job.report(base // mb, total // mb, f"Splitting {rec.name} into {len(files)} files…")
+                    written += splitter.split_file(
+                        rec.path, plan.outputs(rec, files), progress=lambda d, t, b=base: job.report((b + d) // mb, total // mb))
+                    base += rec.frames * rec.channels * (rec.bits // 8)
+                created: list[Path] = []
+                job.report(0, 0, "Moving the original files…")
+                applied = apply_renames(moves, created)
+            except BaseException:
+                # All or nothing: take the track files back out.
+                for path in written:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                remove_empty_dirs([Path(f) for f in new_folders])
+                raise
+            # Only now, with every new file written and checked.
+            deleted, delete_errors = _delete_files(to_delete)
+            return written, applied, created, deleted, delete_errors
+
+        result, error = run_job(self, "Splitting", work, cancellable=False)
+        if error is not None:
+            self._restore_player(released, {})
+            QMessageBox.warning(self, APP_NAME, f"Nothing was split:\n{error}")
+            return
+        written, applied, created, deleted, delete_errors = result
+        gone = {compat.fwd(op.src) for op in applied if catalog.REMOVED_FOLDER in op.dst.parts} | set(deleted)
+        moved = {compat.fwd(op.src): compat.fwd(op.dst) for op in applied if compat.fwd(op.src) not in gone}
+        self._drop_from_library(gone)
+        self._refresh_moved(moved, reread=False)
+        self._restore_player(released, moved)
+        self._add_to_library(written)
+        self._tree_timer.start()
+        first = plan.splits[0][0].name
+        label = f"split of {first}" if len(plan.splits) == 1 else f"split of {len(plan.splits)} files"
+        if not to_delete:
+            self._push_undo({"kind": "compound", "label": label, "parts": [
+                {"kind": "copies", "label": label, "paths": written, "created_dirs": new_folders},
+                {"kind": "rename", "label": label, "applied": applied, "created": created, "removed_dirs": [],
+                 "removed_markers": [], "embed": False}]})
+        else:
+            # Undoing would delete the new files, now the only copy.
+            self._forget_undo_for(set(deleted))
+        self._log("split", files=[r.path for r, _ in plan.splits], written=written,
+                  moved=[[a, b] for a, b in moved.items()], removed=sorted(gone - set(deleted)),
+                  deleted_permanently=deleted)
+        self._select_paths(set(written))
+        summary = (f"Split {len(plan.splits):,} file(s) into {len(written) - len(plan.remainders):,} track files"
+                   + (f" and {len(plan.remainders):,} shrunk original(s)" if plan.remainders else ""))
+        if deleted:
+            summary += f"; {len(deleted):,} original(s) deleted permanently (no undo)"
+        elif gone:
+            summary += f"; {len(gone):,} original(s) moved to {catalog.REMOVED_FOLDER}"
+        if delete_errors:
+            show_report(self, "Split", summary + ". Some originals could not be deleted:", delete_errors)
+        else:
+            self.statusBar().showMessage(summary + ("" if to_delete else f"  ({keys('Ctrl+Z')} undoes)"), 10000)
+
+    def combine_selected(self):
+        """Put the tracks of several files of one take into one polywav (undoable)."""
+        recs = [r for r in self.selected_recordings() if not r.error]
+        if len(recs) < 2:
+            return
+        dialog = CombineDialog(recs, self.qsettings, self)
+        if not dialog.exec():
+            return
+        ordered, dst, root = dialog.ordered(), dialog.destination(), self.root
+        moves = [RenameOp(Path(r.path), Path(duplicates.removal_path(r.path, root, r.project)))
+                 for r in ordered] if dialog.remove.isChecked() else []
+        to_delete = [r.path for r in ordered] if dialog.delete.isChecked() else []
+        released = self._release_player({r.path for r in ordered} if moves or to_delete else set())
+
+        def work(job):
+            job.report(0, 100, f"Writing {os.path.basename(dst)}…")
+            splitter.combine_files([r.path for r in ordered], dst,
+                                   progress=lambda d, t: job.report(d * 100 // max(t, 1), 100))
+            created: list[Path] = []
+            try:
+                applied = apply_renames(moves, created) if moves else []
+            except BaseException:
+                os.remove(dst)  # all or nothing
+                raise
+            deleted, delete_errors = _delete_files(to_delete)  # the new file is written and checked
+            return applied, created, deleted, delete_errors
+
+        result, error = run_job(self, "Combining", work, cancellable=False)
+        if error is not None:
+            self._restore_player(released, {})
+            QMessageBox.warning(self, APP_NAME, f"Nothing was combined:\n{error}")
+            return
+        applied, created, deleted, delete_errors = result
+        gone = {compat.fwd(op.src) for op in applied} | set(deleted)
+        self._drop_from_library(gone)
+        self._restore_player(released, {})
+        self._add_to_library([dst])
+        self._tree_timer.start()
+        label = f"combining into {os.path.basename(dst)}"
+        parts = [{"kind": "copies", "label": label, "paths": [dst]}]
+        if applied:
+            parts.append({"kind": "rename", "label": label, "applied": applied, "created": created,
+                          "removed_dirs": [], "removed_markers": [], "embed": False})
+        if to_delete:
+            self._forget_undo_for(set(deleted))  # undoing would delete the only copy
+        else:
+            self._push_undo({"kind": "compound", "label": label, "parts": parts} if len(parts) > 1 else parts[0])
+        self._log("combine", files=[r.path for r in ordered], written=dst, removed=sorted(gone - set(deleted)),
+                  deleted_permanently=deleted)
+        self._select_paths({dst})
+        summary = f"Combined {len(ordered)} files into {os.path.basename(dst)}"
+        if deleted:
+            summary += f"; {len(deleted)} deleted permanently (no undo)"
+        elif gone:
+            summary += f"; they were moved to {catalog.REMOVED_FOLDER}"
+        if delete_errors:
+            show_report(self, "Combine", summary + ". Some files could not be deleted:", delete_errors)
+        else:
+            self.statusBar().showMessage(summary + ("" if to_delete else f"  ({keys('Ctrl+Z')} undoes)"), 10000)
 
     def do_renames(self, pairs: list[tuple[Recording, Path]], *, embed: bool, label: str,
                    remove_empty: bool = False, push_undo: bool = True) -> dict | None:
@@ -1976,6 +2137,7 @@ class MainWindow(QMainWindow):
                 removed.append(path)
             except OSError:
                 pass
+        remove_empty_dirs([Path(p) for p in part.get("created_dirs", [])])
         self._drop_from_library(set(removed))
         self._log("undo " + part["label"], deleted_copies=removed)
 
@@ -2122,6 +2284,18 @@ def _values_of(rec: Recording, changes: dict) -> dict:
     for key in changes:
         values[key] = rec.meta_project if key == "project" else getattr(rec, key)
     return values
+
+
+def _delete_files(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Delete files for good: (deleted, error messages)."""
+    deleted, errors = [], []
+    for path in paths:
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except OSError as error:
+            errors.append(f"{os.path.basename(path)}: {error.strerror or error}")
+    return deleted, errors
 
 
 def _tidy_holding(paths, holding: str) -> None:
