@@ -29,6 +29,7 @@ DEFAULTS: dict[str, object] = {
     "confirm_undo": True,
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
     "waveform_scale": "db",           # "db" or "linear"
+    "waveform_detailed": True,        # refine the selected file after a quick preview
     "waveform_collapsed": False,
     "mixer_master_db": 0.0,
     "mixer_exclusive_solo": False,
@@ -44,6 +45,7 @@ DEFAULTS: dict[str, object] = {
     "library_index_waveforms_read": True,
     "library_index_waveforms": False,    # update the waveforms
     "library_grouping": "date",       # Library sidebar: "date" (year > month > project) or "name"
+    "card_working_folder": "",       # default: local application cache / card-work
     # Offload
     "verify_copies": True,           # read each copy back and compare with the card
     "include_false_takes": False,    # also copy the recorder's FALSETAKES folder
@@ -61,7 +63,7 @@ DEFAULTS: dict[str, object] = {
 
 
 # Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
-PATH_KEYS = {"library_folder", "mixer_folder", "offload_destinations"}
+PATH_KEYS = {"card_working_folder", "library_folder", "mixer_folder", "offload_destinations"}
 
 
 def get(settings: QSettings, key: str):

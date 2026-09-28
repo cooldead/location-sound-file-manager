@@ -291,7 +291,7 @@ class SetupDialog(QDialog):
         recent = [d for d in settings.get(qsettings, "offload_destinations") if d]
         library = settings.get(qsettings, "library_folder")
         self.output = QLineEdit(recent[0] if recent else library)
-        self.output.setPlaceholderText("Where cards are copied to, e.g. the Sound Backups folder on your NAS")
+        self.output.setPlaceholderText("Where cards are copied to, e.g. the Sound Backups folder on your storage drive")
         output_browse = QPushButton("Browse…")
         output_browse.clicked.connect(lambda: self._browse(self.output, "Default output folder"))
         self.separate_library = QCheckBox("Browse a different folder in the Library")
@@ -311,7 +311,7 @@ class SetupDialog(QDialog):
         library_row.addWidget(library_browse)
         folder_form = QFormLayout(folders)
         folder_form.addRow("Copy cards to:", output_row)
-        hint = QLabel("The default for “Copy to NAS”. The Library shows this folder too, unless you choose "
+        hint = QLabel("The default for “Copy to Storage”. The Library shows this folder too, unless you choose "
                       "another one below.")
         hint.setWordWrap(True)
         hint.setEnabled(False)

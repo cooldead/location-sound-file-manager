@@ -3,6 +3,8 @@ that changes files goes through do_renames() / do_metadata() here (with undo).""
 
 from __future__ import annotations
 
+from . import card_safety
+
 import csv
 import dataclasses
 import json
@@ -336,8 +338,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _=False, p=page: self.set_page(p))
             self.page_group.addAction(action)
             main.addAction(action)
-        self.act_page_offload.setToolTip(f"Card → review & notes → sound report → copy to NAS ({keys('Ctrl+1')})")
-        self.act_page_library.setToolTip(f"Everything on the NAS: browse, play, rename, re-tag ({keys('Ctrl+2')})")
+        self.act_page_offload.setToolTip(f"Card → review & notes → sound report → copy to storage ({keys('Ctrl+1')})")
+        self.act_page_library.setToolTip(f"Everything in storage: browse, play, rename, re-tag ({keys('Ctrl+2')})")
         main.addSeparator()
         self.addToolBar(main)
 
@@ -414,6 +416,7 @@ class MainWindow(QMainWindow):
         self.qsettings.setValue("window/header", self.table.horizontalHeader().saveState())
         self.qsettings.setValue("window/offload_split", self.offload.split.saveState())
         self.qsettings.setValue("window/page", "library" if self.stack.currentIndex() == 1 else "offload")
+        self.offload.shutdown()
         self.player.shutdown()
         super().closeEvent(event)
 
@@ -1072,7 +1075,10 @@ class MainWindow(QMainWindow):
 
     def _release_card(self):
         if self.player.rec is not None and self.offload.is_card_path(self.player.rec.path):
+            self.player.release()
             self.player.load(None)
+        else:
+            self.player.wait_for_background_reads()
 
     def _copied_to_library(self, folders: list[str]):
         if self.scan_thread is None:
@@ -1207,6 +1213,11 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Export list", str(Path.home() / "recordings.csv"),
                                               "CSV files (*.csv)")
         if not path:
+            return
+        try:
+            card_safety.assert_writable(path)
+        except OSError as error:
+            QMessageBox.warning(self, "Export CSV", str(error))
             return
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -1371,6 +1382,7 @@ class MainWindow(QMainWindow):
                 # All or nothing: take the track files back out.
                 for path in written:
                     try:
+                        card_safety.assert_writable(path)
                         os.remove(path)
                     except OSError:
                         pass
@@ -1440,6 +1452,7 @@ class MainWindow(QMainWindow):
             try:
                 applied = apply_renames(moves, created) if moves else []
             except BaseException:
+                card_safety.assert_writable(dst)
                 os.remove(dst)  # all or nothing
                 raise
             deleted, delete_errors = _delete_files(to_delete)  # the new file is written and checked
@@ -1540,9 +1553,11 @@ class MainWindow(QMainWindow):
             # missing folders), and so do the recorders' empty marker files.
             applied = apply_renames(reverse, None, progress=lambda d, t: job.report(d, t))
             for folder in sorted(entry["removed_dirs"], key=lambda p: len(p.parts)):
+                card_safety.assert_writable(folder)
                 folder.mkdir(parents=True, exist_ok=True)
             for marker in entry["removed_markers"]:
                 if not marker.name == ".DS_Store" and marker.parent.is_dir() and not marker.exists():
+                    card_safety.assert_writable(marker)
                     marker.touch()
             remove_empty_dirs(entry["created"])
             errors = []
@@ -1756,6 +1771,7 @@ class MainWindow(QMainWindow):
             if plan.permanent:
                 for rec in out["verified"]:
                     try:
+                        card_safety.assert_writable(rec.path)
                         os.remove(rec.path)
                         out["deleted"].append(rec.path)
                     except OSError as error:
@@ -1955,6 +1971,7 @@ class MainWindow(QMainWindow):
             for n, path in enumerate(paths):
                 job.report(n, len(paths), f"Deleting {os.path.basename(path)}…")
                 try:
+                    card_safety.assert_writable(path)
                     os.remove(path)
                     deleted.append(path)
                 except OSError as error:
@@ -2133,6 +2150,7 @@ class MainWindow(QMainWindow):
         removed = []
         for path in part["paths"]:
             try:
+                card_safety.assert_writable(path)
                 os.remove(path)
                 removed.append(path)
             except OSError:
@@ -2259,6 +2277,7 @@ class MainWindow(QMainWindow):
         rename or rewrite an open file). Returns the state to restore."""
         if self.player.rec is not None and self.player.rec.path in paths:
             return self.player.release()
+        self.player.wait_for_background_reads()
         return None
 
     def _restore_player(self, released, mapping: dict[str, str]):
@@ -2291,6 +2310,7 @@ def _delete_files(paths: list[str]) -> tuple[list[str], list[str]]:
     deleted, errors = [], []
     for path in paths:
         try:
+            card_safety.assert_writable(path)
             os.remove(path)
             deleted.append(path)
         except OSError as error:
@@ -2304,6 +2324,7 @@ def _tidy_holding(paths, holding: str) -> None:
     for folder in sorted({os.path.dirname(p) for p in paths}, key=len, reverse=True):
         while (folder + "/").startswith(holding.rstrip("/") + "/"):
             try:
+                card_safety.assert_writable(folder)
                 os.rmdir(folder)
             except OSError:
                 break

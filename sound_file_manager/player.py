@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QRunnable, QThreadPool, Qt, QTimer, Signal
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import bwf, library_index, settings, waveform
-from .audio_engine import AudioEngine
+from .audio_engine import AudioEngine, AudioSource
 from .catalog import Cache, Recording
 from .markers import Marker, MarkerStore, default_name, next_marker
 from .mixer import MixerState, track_color
@@ -70,44 +71,69 @@ class _PeaksJob(QRunnable):
     file is selected."""
 
     def __init__(self, generation: int, rec: Recording, cache_file: str | None, is_current, prefetch=False,
-                 index: tuple[str, bool, bool] | None = None):
+                 index: tuple[str, bool, bool] | None = None, detailed: bool = True):
         super().__init__()
         self.generation, self.rec, self.cache_file, self.is_current = generation, rec, cache_file, is_current
         self.prefetch = prefetch
+        self.detailed = detailed and not prefetch
         self.index = index  # (library root, read, write) for waveforms kept in the library index
         self.signals = _PeaksSignals()
 
     def run(self):
+        if not self.is_current(self.generation):
+            return
         cache = None
+        preview = None
         try:
+            root, read_index, write_index = self.index or ("", False, False)
             if self.cache_file:
                 cache = Cache(self.cache_file)
                 blob = cache.get_peaks(self.rec.path, self.rec.size, self.rec.mtime)
-                levels = waveform.from_bytes(blob) if blob else None  # None: missing or an older format
-                if levels is not None:
-                    if not self.prefetch:
-                        self.signals.done.emit(self.generation, levels, "")
-                    return
-            root, read_index, write_index = self.index or ("", False, False)
-            if read_index:
-                # One small file instead of reading the whole WAV.
-                blob = library_index.read_levels(root, self.rec.path, self.rec.size, self.rec.mtime)
-                levels = waveform.from_bytes(blob) if blob else None
-                if levels is not None:
-                    if cache is not None:
-                        cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, blob)
-                    if not self.prefetch:
-                        self.signals.done.emit(self.generation, levels, "")
-                    return
+                preview = waveform.from_bytes(blob) if blob else None
+                if preview is not None:
+                    if not self.detailed or waveform.is_complete(blob):
+                        if not self.prefetch:
+                            self.signals.done.emit(self.generation, preview, "")
+                        return
+                    self.signals.partial.emit(self.generation, preview)
             if not self.is_current(self.generation):
                 return
+            if read_index:
+                # Prefer a complete shared cache to another full read of a WAV.
+                blob = library_index.read_levels(root, self.rec.path, self.rec.size, self.rec.mtime)
+                levels = waveform.from_bytes(blob) if blob else None
+                if levels is not None and (preview is None or waveform.is_complete(blob)):
+                    preview = levels
+                    if cache is not None:
+                        cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, blob)
+                    if not self.detailed or waveform.is_complete(blob):
+                        if not self.prefetch:
+                            self.signals.done.emit(self.generation, preview, "")
+                        return
+                    self.signals.partial.emit(self.generation, preview)
+            if not self.is_current(self.generation):
+                return
+            saved_preview = preview is not None
+
+            def partial(levels):
+                nonlocal saved_preview, preview
+                preview = levels
+                self.signals.partial.emit(self.generation, levels)
+                if cache is not None and not saved_preview:
+                    # Keep the first quick preview even if selection cancels
+                    # refinement. An incomplete result is never marked complete.
+                    cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime,
+                                    waveform.to_bytes(levels, complete=False))
+                    saved_preview = True
+
             peaks = waveform.compute_peaks(
-                self.rec.path,
-                on_partial=None if self.prefetch else (lambda p: self.signals.partial.emit(self.generation, p)),
+                self.rec.path, full_read=self.detailed, preview=preview,
+                on_partial=None if self.prefetch else partial,
                 cancelled=lambda: not self.is_current(self.generation))
             if peaks is None:
                 return
-            blob = waveform.to_bytes(peaks)
+            complete = self.detailed or self.rec.size <= waveform.FULL_READ_LIMIT
+            blob = waveform.to_bytes(peaks, complete=complete)
             if cache is not None:
                 cache.put_peaks(self.rec.path, self.rec.size, self.rec.mtime, blob)
             if write_index:
@@ -117,9 +143,9 @@ class _PeaksJob(QRunnable):
                     pass  # only a speed-up; the local cache has it
             if not self.prefetch:
                 self.signals.done.emit(self.generation, peaks, "")
-        except Exception as error:  # noqa: BLE001 - shown in the widget, never fatal
+        except Exception as error:  # noqa: BLE001 - keep a usable preview if refinement fails
             if not self.prefetch:
-                self.signals.done.emit(self.generation, None, str(error))
+                self.signals.done.emit(self.generation, preview, str(error))
         finally:
             if cache is not None:
                 cache.close()
@@ -200,6 +226,7 @@ class WaveformView(QWidget):
         self.markers: list[Marker] = []
         self.selected_marker: Marker | None = None
         self._detail: tuple[tuple[float, float], np.ndarray] | None = None
+        self._detail_request: tuple[tuple[float, float], int] | None = None
         self._pixmap: QPixmap | None = None
         self._playhead_x = -1
         self._drag: tuple | None = None
@@ -213,6 +240,8 @@ class WaveformView(QWidget):
     def clear(self, message: str = ""):
         self.levels, self.tracks, self.position, self.message = None, [], 0.0, message
         self.region, self.markers, self.selected_marker, self._detail = None, [], None, None
+        self._detail_request = None
+        self._detail_timer.stop()
         self.view = (0.0, 1.0)
         self.viewChanged.emit()
         self._invalidate()
@@ -228,6 +257,11 @@ class WaveformView(QWidget):
         if view == self.view:
             self._detail = (view, levels)
             self._invalidate()
+
+    def event(self, event):
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_pixmap"):
+            self._invalidate()
+        return super().event(event)
 
     def set_markers(self, markers: list[Marker]):
         self.markers = sorted(markers, key=lambda m: m.frame)
@@ -298,6 +332,7 @@ class WaveformView(QWidget):
         view = (start, start + span)
         if view != self.view:
             self.view = view
+            self._detail_request = None
             self._invalidate()
             self.viewChanged.emit()
 
@@ -482,12 +517,18 @@ class WaveformView(QWidget):
     # ------------------------------------------------------------ painting
 
     def paintEvent(self, event):
-        ratio = self.devicePixelRatioF()
-        if self._pixmap is None or self._pixmap.size() != self.size() * ratio:
-            self._pixmap = self._render()
         painter = QPainter(self)
-        painter.drawPixmap(QRectF(event.rect()), self._pixmap,
-                           QRectF(event.rect().topLeft() * ratio, event.rect().size() * ratio))
+        self._paint(painter)
+
+    def _paint(self, painter: QPainter):
+        ratio = self.devicePixelRatioF()
+        if (self._pixmap is None or self._pixmap.size() != self.size() * ratio
+                or self._pixmap.devicePixelRatioF() != ratio):
+            self._pixmap = self._render()
+        # Qt clips to the dirty region. Always keep the same image origin:
+        # multiplying integer update rects by e.g. 1.5 rounded source pixels
+        # differently on each repaint, shifting/softening the waveform.
+        painter.drawPixmap(QPointF(0, 0), self._pixmap)
         if self.levels is None:
             return
         height = self.height()
@@ -536,18 +577,27 @@ class WaveformView(QWidget):
         """Levels for the visible part: the detail read for this view, else the
         overview's slice (and ask for detail when that is too coarse)."""
         if self._detail is not None and self._detail[0] == self.view:
-            return self._detail[1]
-        buckets = self.levels.shape[2]
-        first = int(np.floor(self.view[0] * buckets))
-        last = max(int(np.ceil(self.view[1] * buckets)), first + 1)
-        part = self.levels[..., first:min(last, buckets)]
-        if part.shape[2] < columns * 0.9 and self.frames > part.shape[2]:
-            self._detail_timer.start()
+            part = self._detail[1]
+        else:
+            buckets = self.levels.shape[2]
+            first = int(np.floor(self.view[0] * buckets))
+            last = max(int(np.ceil(self.view[1] * buckets)), first + 1)
+            part = self.levels[..., first:min(last, buckets)]
+        # A detail read for a narrower window must not stay stretched after a
+        # resize or monitor change. Once at one bucket/sample, more won't help.
+        visible_frames = max(int(np.ceil(self.view[1] * self.frames)) -
+                             int(self.view[0] * self.frames), 1)
+        wanted = (self.view, columns)
+        if part.shape[2] < min(columns, visible_frames) and self._detail_request != wanted:
+            if not self._detail_timer.isActive():
+                self._detail_timer.start()
         return part
 
     def _ask_detail(self):
         if self.levels is not None:
-            self.detailWanted.emit(self.view[0], self.view[1], int(self.width() * self.devicePixelRatioF()))
+            columns = (self.size() * self.devicePixelRatioF()).width()
+            self._detail_request = (self.view, columns)
+            self.detailWanted.emit(self.view[0], self.view[1], columns)
 
     def _render(self) -> QPixmap:
         ratio = self.devicePixelRatioF()
@@ -682,6 +732,7 @@ class PlayerWidget(QWidget):
         super().__init__(parent)
         self.cache_file = cache_file
         self.qsettings = qsettings
+        self._detailed = bool(self._pref("waveform_detailed"))
         self.rec: Recording | None = None
         self._generation = 0
         self._pool = QThreadPool(self)
@@ -697,6 +748,12 @@ class PlayerWidget(QWidget):
             self.markers = MarkerStore(":memory:")
 
         self.engine = AudioEngine(self)
+        self._open_pool = ThreadPoolExecutor(2, thread_name_prefix="audio-open")
+        self._opening = {}
+        self._play_when_ready = False
+        self._open_timer = QTimer(self)
+        self._open_timer.setInterval(20)
+        self._open_timer.timeout.connect(self._poll_open)
         self.engine.playingChanged.connect(self._playing_changed)
         self.engine.failed.connect(self.message)
 
@@ -902,6 +959,15 @@ class PlayerWidget(QWidget):
     def _set_view(self, mode, scale):
         self.wave.set_view(mode, scale)
 
+    def _set_detailed(self, enabled: bool):
+        self._detailed = enabled
+        if self.qsettings is not None:
+            settings.put(self.qsettings, "waveform_detailed", enabled)
+        if self.rec is not None and self.engine.path == self.rec.path:
+            self._generation += 1
+            self._pool.clear()
+            self._start_peaks(self.rec)
+
     def set_wave_collapsed(self, collapsed: bool):
         self.wave.setVisible(not collapsed)
         self.wave_toggle.setArrowType(Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.DownArrow)
@@ -920,8 +986,15 @@ class PlayerWidget(QWidget):
     def load(self, rec: Recording | None, start: float = 0.0):
         """Show a recording, paused (nothing ever autoplays)."""
         self._generation += 1
-        self.engine.close()
+        self._play_when_ready = False
+        for future in self._opening:
+            future.cancel()
+        self._pool.clear()
+        self._detail_pool.clear()
+        self.engine.close(wait=False)
+        self._detail_token += 1
         self.rec = rec
+        self.wave.set_markers([])
         self.wave.set_region(None)
         self.region_label.setText("")
         self.mixer_panel.reset_meters()
@@ -934,24 +1007,54 @@ class PlayerWidget(QWidget):
             return
         self.title.setText(rec.name)
         self.title.setToolTip(rec.path)
-        try:
-            self.engine.open(rec.path, int(start * (rec.sample_rate or 48000)))
-        except Exception as error:  # noqa: BLE001 - shown in the widget
-            self._set_mixer(None)
-            self.wave.clear(f"Can't play this file: {error}")
-            self._set_enabled(False)
-            self._update_labels(0.0)
-            return
+        self.wave.clear("Opening recording…")
+        self._set_enabled(False)
+        self._update_labels(start)
+        future = self._open_pool.submit(AudioSource, rec.path)
+        self._opening[future] = (self._generation, rec, start)
+        self._open_timer.start()
+
+    def _poll_open(self, *, discard=False):
+        for future, (generation, rec, start) in list(self._opening.items()):
+            if not future.done():
+                continue
+            del self._opening[future]
+            if future.cancelled():
+                continue
+            current = not discard and generation == self._generation
+            try:
+                source = future.result()
+            except Exception as error:  # noqa: BLE001 - reported for the current selection only
+                if current:
+                    self._set_mixer(None)
+                    self.wave.clear(f"Can't play this file: {error}")
+                continue
+            if not current:
+                self.engine.retire(source)
+                continue
+            self.engine.adopt(source, int(start * (rec.sample_rate or 48000)))
+            self._opened(rec, start, source.cues)
+        if not self._opening:
+            self._open_timer.stop()
+
+    def _opened(self, rec, start, cues):
         self._set_mixer(rec)
         self.wave.set_file(self.engine.frames, rec.duration)
         if self.loop_button.isChecked():
             self.engine.set_loop((0, self.engine.frames))
         self.wave.clear("Reading waveform…")
-        self._load_markers(rec)
+        self.wave.set_markers(self.markers.get(rec.path) +
+                              [Marker(frame, name, from_file=True) for frame, name in cues])
         self._set_enabled(True)
         self._update_labels(start)
+        self._start_peaks(rec)
+        if self._play_when_ready:
+            self._play_when_ready = False
+            self.engine.play()
+
+    def _start_peaks(self, rec):
         job = _PeaksJob(self._generation, rec, self.cache_file, lambda g: g == self._generation,
-                        index=self._index_for(rec))
+                        index=self._index_for(rec), detailed=self._detailed)
         job.signals.partial.connect(self._on_peaks_partial)
         job.signals.done.connect(self._on_peaks_done)
         self._pool.start(job, 10)
@@ -984,14 +1087,6 @@ class PlayerWidget(QWidget):
         self._mix_changed()
 
     # ------------------------------------------------------------ markers
-
-    def _load_markers(self, rec: Recording):
-        markers = self.markers.get(rec.path)
-        try:
-            markers += [Marker(frame, name, from_file=True) for frame, name in bwf.read_cues(rec.path)]
-        except (OSError, bwf.WavError, ValueError, IndexError):
-            pass
-        self.wave.set_markers(markers)
 
     def _save_markers(self):
         if self.rec is not None:
@@ -1073,19 +1168,52 @@ class PlayerWidget(QWidget):
         """Close the file (before renaming/writing it). Returns what reload() needs."""
         state = (self.rec, self.position(), self.is_playing())
         self._generation += 1
+        self._play_when_ready = False
+        self._detail_token += 1
+        self._pool.clear()
+        self._detail_pool.clear()
+        self._drain_open()
+        # Renames/writes must wait until every worker has released the file.
+        self._pool.waitForDone()
+        self._detail_pool.waitForDone()
         self.engine.close()
         return state
+
+    def _drain_open(self):
+        self._open_timer.stop()
+        for future in self._opening:
+            future.cancel()
+        for future in self._opening:
+            try:
+                future.result()
+            except Exception:
+                pass
+        self._poll_open(discard=True)
+
+    def wait_for_background_reads(self):
+        """A write may target a previously selected or prefetched recording."""
+        for future in self._opening:
+            try:
+                future.result()
+            except Exception:
+                pass
+        self._poll_open()
+        self._pool.waitForDone()
+        self._detail_pool.waitForDone()
+        self.engine.wait_closed()
 
     def reload(self, rec: Recording | None, position: float):
         self.load(rec, position)
 
     def shutdown(self):
         self._generation += 1
+        self._drain_open()
+        self._open_pool.shutdown(wait=True, cancel_futures=True)
         self._timer.stop()
         self.save_settings()
         self._detail_token += 1
-        self._pool.waitForDone(3000)
-        self._detail_pool.waitForDone(3000)
+        self._pool.waitForDone()
+        self._detail_pool.waitForDone()
         self.engine.shutdown()
         self.markers.close()
 
@@ -1108,7 +1236,11 @@ class PlayerWidget(QWidget):
     # ------------------------------------------------------------ transport
 
     def toggle_play(self):
-        if self.rec is None or self.rec.error or self.engine.path is None:
+        if self.rec is None or self.rec.error:
+            return
+        if self.engine.path is None:
+            if any(g == self._generation for g, _, _ in self._opening.values()):
+                self._play_when_ready = not self._play_when_ready
             return
         if self.engine.playing:
             self.engine.pause()
@@ -1116,6 +1248,7 @@ class PlayerWidget(QWidget):
             self.engine.play()
 
     def stop(self):
+        self._play_when_ready = False
         if self.engine.path is None:
             return
         self.engine.pause()
@@ -1160,7 +1293,10 @@ class PlayerWidget(QWidget):
         self.engine.set_loop((int(region[0] * frames), int(region[1] * frames)) if region else (0, frames))
 
     def position(self) -> float:
-        return self.engine.position() / self.engine.rate if self.engine.path is not None else 0.0
+        if self.engine.path is not None:
+            return self.engine.position() / self.engine.rate
+        return next((start for generation, _, start in self._opening.values()
+                     if generation == self._generation), 0.0)
 
     def is_playing(self) -> bool:
         return self.rec is not None and self.engine.playing
@@ -1246,6 +1382,12 @@ class PlayerWidget(QWidget):
         if self.wave.region is not None:
             menu.addAction("Zoom to Region", self.wave.zoom_to_region)
         menu.addAction("Show Whole File", self.wave.fit)
+        detail = menu.addAction("Detailed Overview")
+        detail.setCheckable(True)
+        detail.setChecked(self._detailed)
+        detail.setToolTip("Show a quick preview, then read the selected recording fully for a sharper overview. "
+                          "The result is cached; turning this off limits reads for large files.")
+        detail.triggered.connect(self._set_detailed)
         menu.addSeparator()
         if self.wave.region is not None:
             menu.addAction("Clear Region", lambda: (self.wave.set_region(None), self._region_changed(None)))

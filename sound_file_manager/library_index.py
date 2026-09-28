@@ -18,6 +18,8 @@ still match the file, otherwise the file is read as before.
 
 from __future__ import annotations
 
+from . import card_safety
+
 import gzip
 import hashlib
 import json
@@ -60,6 +62,7 @@ def _same(size: int, mtime: float, entry_size: int, entry_mtime: float) -> bool:
 
 
 def _write_atomic(path: str, data: bytes) -> None:
+    card_safety.assert_writable(path)
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
     temp = compat.join(folder, f".tmp-{uuid.uuid4().hex}")
@@ -194,5 +197,5 @@ def write_levels(root: str, path: str, size: int, mtime: float, blob: bytes) -> 
 def waveform_bytes(channels: int, buckets: int) -> int:
     """Stored size of one file's waveform: peak + RMS per channel and bucket,
     plus headers, rounded up to the 4 KB a small file takes on most shares."""
-    raw = _LEVELS_HEADER.size + 4 + 2 * channels * buckets
+    raw = _LEVELS_HEADER.size + 5 + 4 * channels * buckets
     return -(-raw // 4096) * 4096

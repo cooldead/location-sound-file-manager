@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 build/
 dist/
+sound_file_manager/_native/
+native/waveform/target/

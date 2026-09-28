@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $PSScriptRoot
 Set-Location $here
 $name = "Location Sound File Manager"
-$version = "1.4.0"
+$version = "1.6.0"
 try {
     $tag = git describe --tags --abbrev=0 2>$null
     if ($tag) { $version = $tag -replace '^v', '' -replace '-(linux|macos|windows)$', '' }
@@ -23,6 +23,8 @@ if (-not (Test-Path $python)) {
 }
 & $python -m pip install --quiet --upgrade pip
 & $python -m pip install --quiet PySide6 numpy pyinstaller pillow
+& $python scripts/build_native.py
+if ($LASTEXITCODE -ne 0) { throw "Rust waveform build failed (install the Rust toolchain first)" }
 
 # The app icon: an .ico from the 256 px PNG (sizes Windows uses in Explorer and the taskbar).
 New-Item -ItemType Directory -Force $build | Out-Null
@@ -51,6 +53,7 @@ VSVersionInfo(
     --icon $ico `
     --version-file (Join-Path $build "version.txt") `
     --add-data "$here\sound_file_manager\assets;sound_file_manager\assets" --paths $here `
+    --add-binary "$here\sound_file_manager\_native\sfm_waveform.dll;sound_file_manager\_native" `
     --workpath (Join-Path $build "work") --specpath $build --distpath (Join-Path $here "dist") `
     (Join-Path $here "windows\launcher.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }

@@ -5,6 +5,8 @@ Nothing in here touches Qt so it can be unit tested on its own.
 
 from __future__ import annotations
 
+from . import card_safety
+
 import errno
 import os
 import re
@@ -145,6 +147,7 @@ def apply_renames(ops: list[RenameOp], created_dirs: list[Path] | None = None,
     Returns the renames that were applied (no-ops removed), for undo.
     progress(done, total) is called as files move (two steps per file).
     """
+    card_safety.assert_writable(*(p for op in ops for p in (op.src, op.dst)))
     created: list[Path] = []
     ops = [op for op in ops if op.src != op.dst]
     if not ops:
@@ -202,6 +205,7 @@ def remove_empty_dirs(dirs: list[Path]) -> None:
     """Remove the given folders, deepest first, if they are empty."""
     for path in sorted(set(dirs), key=lambda p: len(p.parts), reverse=True):
         try:
+            card_safety.assert_writable(path)
             os.rmdir(path)
         except OSError:
             pass

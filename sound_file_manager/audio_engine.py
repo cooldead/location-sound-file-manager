@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -26,6 +27,39 @@ BLOCK_FRAMES = 4096  # read from the file at a time
 AHEAD_BLOCKS = 16  # decoded ahead of the playhead (~1.4 s at 48 kHz)
 PIECE_FRAMES = 512  # mixed at a time: the automation and meter resolution
 BUFFER_SECONDS = 0.2  # queued in the audio device
+
+
+class AudioSource:
+    """An open WAV owned independently of Qt; preparation/closing may block."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.lock = threading.Lock()
+        self.fd = os.open(path, compat.O_RDONLY)
+        try:
+            with os.fdopen(os.dup(self.fd), "rb") as f:
+                self.layout = bwf.read_layout(f, os.fstat(f.fileno()).st_size)
+                self.info = bwf._info_from(f, self.layout)
+                self.data = self.layout.first(b"data")
+                if self.data is None or not self.info.block_align or not self.info.channels:
+                    raise bwf.WavError("no audio data")
+                try:
+                    self.cues = bwf.cues_from_layout(f, self.layout)
+                except (OSError, bwf.WavError, ValueError, IndexError):
+                    self.cues = []
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        with self.lock:
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+
+    def read(self, size, offset):
+        with self.lock:
+            return _pread_all(self.fd, size, offset) if self.fd is not None else b""
 
 
 class AudioEngine(QObject):
@@ -42,7 +76,9 @@ class AudioEngine(QObject):
         self.frames = 0
         self._bits, self._float, self._align, self._offset = 16, False, 0, 0
         self._fd: int | None = None
-        self._io_lock = threading.Lock()  # held while reading, so close() never pulls the file away mid-read
+        self._source: AudioSource | None = None
+        self._closer = ThreadPoolExecutor(1, thread_name_prefix="audio-close")
+        self._closing = []
         self._cond = threading.Condition()
         self._blocks: deque = deque()  # (file frame, samples (n, channels))
         self._read_pos = 0
@@ -69,38 +105,45 @@ class AudioEngine(QObject):
     def open(self, path: str, start_frame: int = 0) -> None:
         """Open a WAV (stopped at start_frame). Raises OSError / bwf.WavError."""
         self.close()
-        fd = os.open(path, compat.O_RDONLY)
-        try:
-            with os.fdopen(os.dup(fd), "rb") as f:
-                layout = bwf.read_layout(f, os.fstat(f.fileno()).st_size)
-                info = bwf._info_from(f, layout)
-            data = layout.first(b"data")
-            if data is None or not info.block_align or not info.channels:
-                raise bwf.WavError("no audio data")
-        except BaseException:
-            os.close(fd)
-            raise
-        with self._io_lock:
-            self._fd = fd
-        self.path = path
+        self.adopt(AudioSource(path), start_frame)
+
+    def adopt(self, source: AudioSource, start_frame: int = 0):
+        """Install a prepared source on the GUI thread, without network I/O."""
+        self.close(wait=False)
+        info, data = source.info, source.data
+        self.path = source.path
         self.rate, self.channels = info.sample_rate or 48000, info.channels
         self._bits, self._float, self._align = info.bits, info.format_tag == 3, info.block_align
         self._offset, self.frames = data.data_offset, data.size // info.block_align
         self.loop = None
         self._pos = min(max(start_frame, 0), self.frames)
-        self._restart_reader(self._pos)
+        with self._cond:
+            self._source, self._fd = source, source.fd
+            self._restart_reader(self._pos)
 
-    def close(self) -> None:
+    def retire(self, source: AudioSource):
+        self._closing = [f for f in self._closing if not f.done()]
+        self._closing.append(self._closer.submit(source.close))
+
+    def wait_closed(self):
+        """Wait for retired sources before a file operation; keep current playback."""
+        for future in self._closing:
+            future.result()
+        self._closing.clear()
+
+    def close(self, *, wait: bool = True) -> None:
         self._stop_output()
         self._set_playing(False)
         with self._cond:
             self._gen += 1
             self._blocks.clear()
+            source, self._source = self._source, None
+            self._fd = None
             self._cond.notify_all()
-        with self._io_lock:
-            if self._fd is not None:
-                os.close(self._fd)
-                self._fd = None
+        if source is not None:
+            self.retire(source)
+        if wait:
+            self.wait_closed()
         self.path = None
         self.frames = self.channels = 0
         self._pos = 0
@@ -111,6 +154,7 @@ class AudioEngine(QObject):
             self._stop = True
             self._cond.notify_all()
         self._thread.join(2)
+        self._closer.shutdown(wait=True)
 
     # ------------------------------------------------------------ transport
 
@@ -295,7 +339,7 @@ class AudioEngine(QObject):
     def _reader(self) -> None:
         while True:
             with self._cond:
-                while not self._stop and (self._fd is None or self._eof or len(self._blocks) >= AHEAD_BLOCKS):
+                while not self._stop and (self._source is None or self._eof or len(self._blocks) >= AHEAD_BLOCKS):
                     self._cond.wait(0.25)
                 if self._stop:
                     return
@@ -310,11 +354,9 @@ class AudioEngine(QObject):
                 count = min(BLOCK_FRAMES, end - pos)
                 align, offset = self._align, self._offset
                 bits, channels, is_float = self._bits, self.channels, self._float
+                source = self._source
             try:
-                with self._io_lock:
-                    if self._fd is None:
-                        continue
-                    raw = _pread_all(self._fd, count * align, offset + pos * align)
+                raw = source.read(count * align, offset + pos * align)
                 samples = decode(raw, bits, channels, is_float)
             except (OSError, bwf.WavError):
                 samples = np.zeros((0, max(channels, 1)), np.float32)

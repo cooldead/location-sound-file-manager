@@ -3,6 +3,8 @@ with Qt's text engine (needs a QGuiApplication, but no widgets)."""
 
 from __future__ import annotations
 
+from . import card_safety
+
 import csv
 import os
 import re
@@ -388,6 +390,7 @@ def default_basename(info: ReportInfo, recs: list[Recording]) -> str:
 
 def write_csv(path: str | os.PathLike, info: ReportInfo, recs: list[Recording]) -> None:
     """Same shape as the hand-made reports: title, header pairs, then the table."""
+    card_safety.assert_writable(path)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow(["SOUND REPORT"])
@@ -496,6 +499,7 @@ def build_html(info: ReportInfo, recs: list[Recording]) -> str:
 
 def write_pdf(path: str | os.PathLike, info: ReportInfo, recs: list[Recording]) -> None:
     """Letter size, landscape or portrait (info.orientation), with page numbers."""
+    card_safety.assert_writable(path)
     from PySide6.QtCore import QMarginsF, QSizeF, QUrl
     from PySide6.QtGui import QImage, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 

@@ -87,7 +87,8 @@ def _same_stream(a, b, length: int, cancelled: Callable[[], bool], progress: Cal
         if cancelled():
             raise InterruptedError()
         n = min(COMPARE_BLOCK, length - done)
-        if a.read(n) != b.read(n):
+        left, right = a.read(n), b.read(n)
+        if len(left) != n or len(right) != n or left != right:
             return False
         done += n
         if progress:

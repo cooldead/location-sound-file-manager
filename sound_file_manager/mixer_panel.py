@@ -6,6 +6,8 @@ The panel edits a mixer.MixerState that the audio engine reads live.
 
 from __future__ import annotations
 
+from . import card_safety
+
 import json
 import math
 import os
@@ -637,6 +639,7 @@ class MixerPanel(QWidget):
         data = self.state.to_dict()
         data["recording"] = self.file_name
         try:
+            card_safety.assert_writable(path)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1)
         except OSError as error:
