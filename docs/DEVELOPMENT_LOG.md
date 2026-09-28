@@ -257,3 +257,11 @@
 Pulled the Linux 1.5.0 work (split/combine, table edits, notes box, Undo crash fix, Windows port) onto the Mac. No Mac-specific code was needed: the new modules are plain Python/numpy, and `compat.py` leaves macOS on the `os` functions. Only UI text: the notes box tooltip showed "Ctrl+Enter" (now `keys()`, ⌘↵) and the Split dialog's hints said "Ctrl-click", which on a Mac is ⌘-click (`dialogs.MULTI_CLICK`).
 
 **Verified on macOS** (Apple silicon): 178 unit tests; an offscreen GUI script on scratch files: split (track levels checked), Undo through the confirmation box with "Don't ask again" (the crash), split → combine (sample-identical to the original) → Undo twice, a scene edit in the table renaming the file (iXML and bext), a note from the notes box, Undo of both. Then the built `.app` was launched and checked.
+
+## 2026-09-28: macOS build of 1.6.0
+
+Pulled the Linux 1.6.0 work (Rust waveform core, background waveform refinement, local card working copies with write protection and backup verification). Installed Rust with Homebrew for the Mac build; the crate has no dependencies and builds offline for arm64. Measured on Apple silicon: 13.6 ms (Rust) vs 57.4 ms (numpy) to reduce one minute of 6-track 24-bit audio.
+
+**Mac fix:** `card_safety` compared paths after `normcase` + `realpath`, which change nothing on macOS, but Mac volumes (APFS, exFAT/FAT cards) ignore case and Unicode form: a write to `/Volumes/sd_card/...` passed the guard for a card protected as `/Volumes/SD_CARD`. Paths are now casefolded and NFC-normalised on macOS (test: `test_guard_ignores_case_and_unicode_form_on_mac`, which failed before).
+
+**Verified on macOS:** 219 unit tests (the Rust tests run now instead of skipping); an offscreen GUI run with a FAT32 disk image as the card: local working copy, protection under both case spellings, a review note written only into the storage copy, the card unchanged (checksums), the working copy removed on close; the player with a 494 MB 6-track file (first waveform 0.1 s, complete 0.3 s) and playback; then the built `.app`.
