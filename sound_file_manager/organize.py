@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from . import card_safety
+
 import os
 import re
 from dataclasses import dataclass
@@ -161,16 +163,19 @@ def empty_tree(folder: Path) -> list[Path] | None:
 def remove_tree_if_empty(folder: Path) -> tuple[list[Path], list[Path]]:
     """Remove a folder and its subfolders if they hold only marker files
     (checked again right before). Returns (removed folders, removed markers)."""
+    card_safety.assert_writable(folder)
     markers = empty_tree(folder)
     if markers is None:
         return [], []
     removed_markers, removed_dirs = [], []
     try:
         for marker in markers:
+            card_safety.assert_writable(marker)
             marker.unlink()
             removed_markers.append(marker)
         subfolders = [Path(d) for d, _, _ in os.walk(folder)]
         for path in sorted(subfolders, key=lambda p: len(p.parts), reverse=True):
+            card_safety.assert_writable(path)
             path.rmdir()
             removed_dirs.append(path)
     except OSError:

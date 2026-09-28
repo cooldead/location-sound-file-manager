@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build the Linux release files into dist/linux/:
 #   Location-Sound-File-Manager-X.Y.Z-linux.tar.gz   the app (source, ready to run)
-#   location-sound-file-manager-X.Y.Z-1-any.pkg.tar.zst   Arch package (needs makepkg)
+#   location-sound-file-manager-X.Y.Z-1-x86_64.pkg.tar.zst   Arch package (needs makepkg + Rust)
 #   Location-Sound-File-Manager-X.Y.Z-x86_64.AppImage     everything inside
 # Usage: linux/build_packages.sh [X.Y.Z] [--no-arch] [--no-appimage]
 # The code comes from the tag vX.Y.Z-linux when it exists, else from HEAD.
@@ -51,8 +51,10 @@ if [ "$appimage" = 1 ]; then
     python3 -m venv "$build/venv"
     "$build/venv/bin/pip" install --quiet --upgrade pip
     "$build/venv/bin/pip" install --quiet PySide6 numpy pyinstaller
+    "$build/venv/bin/python" "$src/scripts/build_native.py"
     "$build/venv/bin/pyinstaller" --noconfirm --clean --windowed --name "$name" \
         --add-data "$src/sound_file_manager/assets:sound_file_manager/assets" --paths "$src" \
+        --add-binary "$src/sound_file_manager/_native/libsfm_waveform.so:sound_file_manager/_native" \
         --workpath "$build/work" --specpath "$build" --distpath "$build/pyinstaller" \
         --log-level WARN "$here/linux/launcher.py"
     appdir="$build/AppDir"

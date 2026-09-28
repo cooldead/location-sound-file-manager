@@ -78,7 +78,7 @@ class ReportDialog(QDialog):
     groups, Previous / Next step through them; each keeps its own header
     fields while columns, style and page apply to all.
 
-    mode "export": OK keeps the details for the copy to the NAS (infos()).
+    mode "export": OK keeps the details for the copy to storage (infos()).
     mode "save": save the PDF / CSV now (this report, or all of them)."""
 
     def __init__(self, groups, qsettings, *, mode: str = "save", info: report.ReportInfo | None = None,
@@ -160,8 +160,8 @@ class ReportDialog(QDialog):
         box = QDialogButtonBox()
         many = len(self.groups) > 1
         if mode == "export":
-            ok = box.addButton("Use for the NAS Copy", QDialogButtonBox.ButtonRole.AcceptRole)
-            ok.setToolTip("The reports are saved into the project folders when the files are copied to the NAS")
+            ok = box.addButton("Use for Storage Copy", QDialogButtonBox.ButtonRole.AcceptRole)
+            ok.setToolTip("The reports are saved into the project folders when the files are copied to storage")
             save_now = box.addButton("Save a Copy Now…", QDialogButtonBox.ButtonRole.ActionRole)
             save_now.clicked.connect(self._save_current)
         else:

@@ -8,7 +8,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$here"
 name="Location Sound File Manager"
 version="$(git describe --tags --abbrev=0 2>/dev/null | sed -E 's/^v//; s/-(linux|macos|windows)$//')"
-version="${version:-1.5.0}"
+version="${version:-1.6.0}"
 build="$here/build/macos"
 
 # A private venv, so the system/Homebrew Python stays untouched.
@@ -17,6 +17,7 @@ if [ ! -x .venv/bin/python ]; then
 fi
 .venv/bin/pip install --quiet --upgrade pip
 .venv/bin/pip install --quiet PySide6 numpy pyinstaller
+.venv/bin/python scripts/build_native.py
 
 # The app icon: an .icns from the 256 px PNG.
 mkdir -p "$build/icon.iconset"
@@ -34,6 +35,7 @@ iconutil -c icns "$build/icon.iconset" -o "$build/icon.icns"
     --icon "$build/icon.icns" \
     --osx-bundle-identifier io.github.cooldead.location-sound-file-manager \
     --add-data "$here/sound_file_manager/assets:sound_file_manager/assets" --paths "$here" \
+    --add-binary "$here/sound_file_manager/_native/libsfm_waveform.dylib:sound_file_manager/_native" \
     --workpath "$build/work" --specpath "$build" --distpath "$here/dist" \
     "$here/macos/launcher.py"
 

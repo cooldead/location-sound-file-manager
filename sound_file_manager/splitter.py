@@ -10,6 +10,8 @@ take) and a HISTORY that names the file it came from. Cue points are copied.
 
 from __future__ import annotations
 
+from . import card_safety
+
 import os
 import re
 import struct
@@ -283,6 +285,7 @@ def split_file(src: str, files: list[TrackFile],
     """Write the track files of one recording. They are written under temporary
     names and only get their names when all are complete and check out; on any
     error nothing is left behind. Returns the paths written."""
+    card_safety.assert_writable(*(f.dst for f in files))
     with open(src, "rb") as f:
         size = os.fstat(f.fileno()).st_size
         layout = bwf.read_layout(f, size)
@@ -524,6 +527,7 @@ def combine_bext(old: bytes, tracks: list[str], name: str) -> bytes:
 def combine_files(srcs: list[str], dst: str, progress: Callable[[int, int], None] | None = None) -> str:
     """Write one polywav with the tracks of srcs in order (they must pass
     combine_problems). Written under a temporary name, checked, then renamed."""
+    card_safety.assert_writable(dst)
     files, infos, datas, layouts = [], [], [], []
     temp = compat.join(os.path.dirname(dst), f".{os.path.basename(dst)}.part")
     out = None

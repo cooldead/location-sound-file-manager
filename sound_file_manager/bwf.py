@@ -18,6 +18,8 @@ the caller explicitly allows it.
 
 from __future__ import annotations
 
+from . import card_safety
+
 import os
 import re
 import struct
@@ -374,6 +376,7 @@ def update_metadata(path: str | os.PathLike, changes: dict, *, filename: str | N
     False (nothing is written in that case), WavError for other problems.
     The result is read back and checked before returning.
     """
+    card_safety.assert_writable(path)
     for key in changes:
         if key not in FIELDS:
             raise ValueError(f"unknown field {key!r}")
@@ -580,33 +583,38 @@ def read_cues(path: str) -> list[tuple[int, str]]:
     from the "cue " chunk and the labels in a LIST/adtl chunk. Read only."""
     with open(path, "rb") as f:
         layout = read_layout(f, os.fstat(f.fileno()).st_size)
-        cue = layout.first(b"cue ")
-        if cue is None or cue.size < 4:
-            return []
-        f.seek(cue.data_offset)
-        payload = f.read(min(cue.size, 1 << 20))
-        count = struct.unpack_from("<I", payload, 0)[0]
-        points: dict[int, int] = {}
-        for i in range(min(count, (len(payload) - 4) // 24)):
-            cue_id, _position, _chunk, _chunk_start, _block_start, offset = \
-                struct.unpack_from("<II4sIII", payload, 4 + i * 24)
-            points[cue_id] = offset
-        labels: dict[int, str] = {}
-        for chunk in layout.chunks:
-            if chunk.id != b"LIST" or chunk.size < 4:
-                continue
-            f.seek(chunk.data_offset)
-            body = f.read(min(chunk.size, 1 << 20))
-            if body[:4] != b"adtl":
-                continue
-            pos = 4
-            while pos + 8 <= len(body):
-                sub_id, sub_size = struct.unpack_from("<4sI", body, pos)
-                if sub_id in (b"labl", b"note") and sub_size >= 4:
-                    cue_id = struct.unpack_from("<I", body, pos + 8)[0]
-                    text = body[pos + 12:pos + 8 + sub_size].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
-                    if sub_id == b"labl" or cue_id not in labels:
-                        labels[cue_id] = text
-                pos += 8 + sub_size + (sub_size & 1)
+        return cues_from_layout(f, layout)
+
+
+def cues_from_layout(f, layout: Layout) -> list[tuple[int, str]]:
+    """Read cues using an already open file and parsed layout."""
+    cue = layout.first(b"cue ")
+    if cue is None or cue.size < 4:
+        return []
+    f.seek(cue.data_offset)
+    payload = f.read(min(cue.size, 1 << 20))
+    count = struct.unpack_from("<I", payload, 0)[0]
+    points: dict[int, int] = {}
+    for i in range(min(count, (len(payload) - 4) // 24)):
+        cue_id, _position, _chunk, _chunk_start, _block_start, offset = \
+            struct.unpack_from("<II4sIII", payload, 4 + i * 24)
+        points[cue_id] = offset
+    labels: dict[int, str] = {}
+    for chunk in layout.chunks:
+        if chunk.id != b"LIST" or chunk.size < 4:
+            continue
+        f.seek(chunk.data_offset)
+        body = f.read(min(chunk.size, 1 << 20))
+        if body[:4] != b"adtl":
+            continue
+        pos = 4
+        while pos + 8 <= len(body):
+            sub_id, sub_size = struct.unpack_from("<4sI", body, pos)
+            if sub_id in (b"labl", b"note") and sub_size >= 4:
+                cue_id = struct.unpack_from("<I", body, pos + 8)[0]
+                text = body[pos + 12:pos + 8 + sub_size].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+                if sub_id == b"labl" or cue_id not in labels:
+                    labels[cue_id] = text
+            pos += 8 + sub_size + (sub_size & 1)
     return sorted((frame, labels.get(cue_id, "") or f"Cue {n + 1}")
                   for n, (cue_id, frame) in enumerate(sorted(points.items(), key=lambda kv: kv[1])))

@@ -1,4 +1,4 @@
-"""Pure card-offload logic: find recorder cards, plan the copy to the NAS, copy
+"""Pure card-offload logic: find recorder cards, plan the copy to storage, copy
 with verification. No Qt.
 
 A Sound Devices card looks like ``<card>/<Project>/<Day>/[<Take>/]files`` next
@@ -10,6 +10,8 @@ library is already laid out.
 """
 
 from __future__ import annotations
+
+from . import card_safety
 
 import hashlib
 import json
@@ -241,13 +243,18 @@ def destination_for(src: str, card_root: str, library: str, folder_names: dict[s
     name = (new_names or {}).get(src)
     if name:
         rest = (*rest[:-1], name)
-    return compat.fwd(Path(library, target_folder, *rest) if target_folder else Path(library, *rest))
+    target = compat.fwd(Path(library, target_folder, *rest) if target_folder else Path(library, *rest))
+    if not card_safety.below(target, library):
+        raise PermissionError("The destination must stay inside the selected storage folder.")
+    card_safety.assert_writable(target)
+    return target
 
 
 def plan_copy(files: list[str], card_root: str, library: str, folder_names: dict[str, str],
               new_names: dict[str, str] | None = None) -> list[CopyItem]:
     """What to copy; files already present with the same size and date are
     skipped, and a different file in the way is a conflict (never overwritten)."""
+    card_safety.assert_writable(library)
     items = []
     seen: dict[str, str] = {}
     for src in files:
@@ -305,13 +312,15 @@ class CopyResult:
 BLOCK = 8 << 20
 
 
-def copy_items(items: list[CopyItem], *, verify: bool = True,
+def copy_items(items: list[CopyItem], *, verify: bool = True, durable: bool = True,
                progress: Callable[[CopyProgress], None] | None = None,
                cancelled: Callable[[], bool] = lambda: False) -> CopyResult:
     """Copy the "new" items. Each file is written to a temporary name next to
     its destination, checked (size, and an MD5 of the copy read back against the
     source's when verify is on), given the source's dates, then renamed into
-    place. An existing file is never replaced."""
+    place. An existing file is never replaced. Disposable working copies can
+    disable durable writes to avoid forcing each file to disk before review."""
+    card_safety.assert_writable(*(i.dst for i in items))
     result = CopyResult()
     todo = [i for i in items if i.needs_copy]
     result.skipped = [i for i in items if not i.needs_copy]
@@ -334,7 +343,7 @@ def copy_items(items: list[CopyItem], *, verify: bool = True,
             folder = os.path.dirname(item.dst)
             _make_dirs(folder, result.created_dirs)
             temp = compat.join(folder, f".sfm-part-{uuid.uuid4().hex}")
-            source_hash = hashlib.md5()
+            source_hash = hashlib.md5() if verify else None
             state.phase = "copy"
             with open(item.src, "rb") as src, open(temp, "wb") as dst:
                 while True:
@@ -343,12 +352,14 @@ def copy_items(items: list[CopyItem], *, verify: bool = True,
                     block = src.read(BLOCK)
                     if not block:
                         break
-                    source_hash.update(block)
+                    if source_hash is not None:
+                        source_hash.update(block)
                     dst.write(block)
                     state.done_bytes += len(block)
                     report()
                 dst.flush()
-                os.fsync(dst.fileno())
+                if durable:
+                    os.fsync(dst.fileno())
             if os.path.getsize(temp) != item.size:
                 raise OSError("the copy has a different size than the original")
             if verify:

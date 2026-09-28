@@ -135,8 +135,8 @@ class LibraryIndexTests(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
     def test_waveform_size_estimate(self):
-        # 6 tracks x 4096 buckets x peak + RMS = 48 KB, rounded to 4 KB blocks.
-        self.assertEqual(library_index.waveform_bytes(6, 4096), 53248)
+        # 16-bit peak + RMS levels, plus headers, rounded to 4 KB blocks.
+        self.assertEqual(library_index.waveform_bytes(6, 4096), 102400)
 
 
 if __name__ == "__main__":

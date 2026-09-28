@@ -337,6 +337,7 @@ def is_audio_file(name: str) -> bool:
 # walk of 16,700 files took 273 s one at a time and 70 s with 16 (more did not
 # help). On a local disk it changes little.
 WALK_WORKERS = 16
+METADATA_WORKERS = 4
 
 
 def walk_audio(root: str, cancelled: Callable[[], bool] = lambda: False, *,
@@ -434,7 +435,7 @@ class ScanStats:
 def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None],
          on_progress: Callable[[ScanStats, str], None] | None = None,
          cancelled: Callable[[], bool] = lambda: False, batch_size: int = 250,
-         index=None, read_index: bool = True) -> ScanStats:
+         index=None, read_index: bool = True, metadata_workers: int = METADATA_WORKERS) -> ScanStats:
     """Walk root, using the cache where size and mtime match, then the
     library index (a library_index.LibraryIndex, optional; with read_index
     off it is only brought up to date, not used). Recordings are
@@ -446,34 +447,69 @@ def scan(root: str, cache: Cache, *, on_batch: Callable[[list[Recording]], None]
     seen: set[str] = set()
     batch: list[Recording] = []
     last_report = 0.0
-    for path, stat in walk_audio(root, cancelled, failed=stats.unlisted):
-        seen.add(path)
-        stats.found += 1
-        rec = cache.get(path, stat.st_size, stat.st_mtime)
-        if rec is None and index is not None and read_index:
-            rec = index.get(path, stat.st_size, stat.st_mtime)
-            if rec is not None:
-                cache.put(rec, commit=False)
-                stats.indexed += 1
-        elif rec is not None:
-            stats.cached += 1
-        if rec is None:
-            rec = read_recording(path, stat)
-            cache.put(rec, commit=False)
-            stats.parsed += 1
-            if rec.error:
-                stats.errors += 1
+    last_batch = started
+
+    def deliver(rec):
+        nonlocal batch, last_report, last_batch
         batch.append(rec)
         if index is not None:
             everything.append(rec)
-        if len(batch) >= batch_size:
+        now = time.monotonic()
+        if len(batch) >= batch_size or now - last_batch >= 0.25:
             cache.db.commit()
             on_batch(batch)
             batch = []
-        now = time.monotonic()
+            last_batch = now
         if on_progress and now - last_report > 0.2:
             last_report = now
-            on_progress(stats, path)
+            on_progress(stats, rec.path)
+
+    workers = max(1, metadata_workers)
+    pool = ThreadPoolExecutor(workers, thread_name_prefix="metadata")
+    pending = set()
+
+    def collect(block=False):
+        nonlocal pending
+        if not pending:
+            return
+        done, pending = wait(pending, timeout=0.1 if block else 0, return_when=FIRST_COMPLETED)
+        for future in done:
+            rec = future.result()
+            # SQLite remains on the scan thread; workers only read WAVs.
+            cache.put(rec, commit=False)
+            stats.parsed += 1
+            stats.errors += bool(rec.error)
+            deliver(rec)
+
+    walker = walk_audio(root, cancelled, failed=stats.unlisted)
+    try:
+        for path, stat in walker:
+            if cancelled():
+                break
+            seen.add(path)
+            stats.found += 1
+            rec = cache.get(path, stat.st_size, stat.st_mtime)
+            if rec is not None:
+                stats.cached += 1
+            elif index is not None and read_index:
+                rec = index.get(path, stat.st_size, stat.st_mtime)
+                if rec is not None:
+                    cache.put(rec, commit=False)
+                    stats.indexed += 1
+            if rec is not None:
+                deliver(rec)
+            else:
+                pending.add(pool.submit(read_recording, path, stat))
+            collect()
+            # Bound both queued reads and memory, even on a very large share.
+            while len(pending) >= workers * 2 and not cancelled():
+                collect(block=True)
+        while pending and not cancelled():
+            collect(block=True)
+    finally:
+        walker.close()
+        # The scan thread must not report completion while a WAV is still open.
+        pool.shutdown(wait=True, cancel_futures=True)
     cache.db.commit()
     if batch:
         on_batch(batch)

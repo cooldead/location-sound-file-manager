@@ -1,8 +1,7 @@
 """Pure waveform overview: per-channel peak and RMS levels for a WAV, read with bounded I/O.
 
-The files live on a network share, so long recordings are not read in full:
-past FULL_READ_LIMIT, evenly spaced blocks are sampled instead. That is plenty
-for an overview the width of a window.
+The default read budget samples long recordings on a network share. Selected
+files can opt into a full sequential read after a quick or cached preview.
 
 Levels are float32 arrays shaped (2, channels, buckets): [0] the peak and
 [1] the RMS of each bucket, on a dB scale (FLOOR_DB -> 0, 0 dBFS -> 1).
@@ -11,11 +10,12 @@ Levels are float32 arrays shaped (2, channels, buckets): [0] the peak and
 from __future__ import annotations
 
 import os
+import time
 from typing import Callable
 
 import numpy as np
 
-from . import bwf
+from . import bwf, native_waveform
 
 BUCKETS = 4096  # wider than most screens in device pixels, so the full view is sharp
 FULL_READ_LIMIT = 256 << 20  # read files up to this size completely
@@ -25,8 +25,9 @@ SAMPLE_BYTES = 64 << 10
 QUICK_PREVIEW_ABOVE = 48 << 20  # show a coarse outline first for files bigger than this
 QUICK_PREVIEW_SLOTS = 48
 FLOOR_DB = -60.0
-MAGIC = b"\xffW2"
-OVER_LEVEL = 254.5 / 255  # a peak level at full scale (as stored in the cache, uint8)  # cache blobs with peak + RMS (older blobs held peaks only)
+LEGACY_MAGIC = b"\xffW2"
+MAGIC = b"\xffW3"
+OVER_LEVEL = 65534.5 / 65535  # a peak that rounds to full scale in the 16-bit cache
 
 
 def decode(raw: bytes, bits: int, channels: int, is_float: bool) -> np.ndarray:
@@ -65,6 +66,16 @@ def decode(raw: bytes, bits: int, channels: int, is_float: bool) -> np.ndarray:
 _decode = decode  # the old name
 
 
+def _reduce(raw: bytes, bits: int, channels: int, is_float: bool, cuts):
+    """Decode and accumulate in one Rust pass, with a NumPy fallback."""
+    result = native_waveform.reduce(raw, bits, channels, is_float, cuts)
+    if result is not None:
+        return result
+    samples = np.abs(decode(raw, bits, channels, is_float))
+    return (np.maximum.reduceat(samples, cuts[:-1], axis=0).T,
+            np.add.reduceat(samples.astype(np.float64) ** 2, cuts[:-1], axis=0).T)
+
+
 def _to_levels(values: np.ndarray) -> np.ndarray:
     with np.errstate(divide="ignore"):
         db = 20 * np.log10(np.clip(values, 1e-9, None))
@@ -78,13 +89,15 @@ def _levels(peaks: np.ndarray, sums: np.ndarray, counts: np.ndarray) -> np.ndarr
 
 def compute_peaks(path: str, buckets: int = BUCKETS, *, first_frame: int = 0, end_frame: int | None = None,
                   on_partial: Callable[[np.ndarray], None] | None = None,
-                  cancelled: Callable[[], bool] = lambda: False) -> np.ndarray | None:
+                  cancelled: Callable[[], bool] = lambda: False, full_read: bool = False,
+                  preview: np.ndarray | None = None) -> np.ndarray | None:
     """Peak and RMS level per bucket and channel, float32 (2, channels, buckets)
     in 0..1 on a dB scale. Returns None if cancelled.
 
     on_partial receives intermediate results (same shape) so the display can
     fill in while a long file is still being read. first_frame / end_frame
-    limit it to part of the file (a zoomed-in view).
+    limit it to part of the file (a zoomed-in view). full_read refines even a
+    large file after a quick preview; a cached preview avoids extra random reads.
     """
     with open(path, "rb") as f:
         layout = bwf.read_layout(f, os.fstat(f.fileno()).st_size)
@@ -104,9 +117,9 @@ def compute_peaks(path: str, buckets: int = BUCKETS, *, first_frame: int = 0, en
         is_float = info.format_tag == 3
         channels = info.channels
 
-        def read_block(start_frame: int, count: int) -> np.ndarray:
+        def read_block(start_frame: int, count: int) -> bytes:
             f.seek(base + start_frame * info.block_align)
-            return np.abs(decode(f.read(count * info.block_align), info.bits, channels, is_float))
+            return f.read(count * info.block_align)
 
         def sampled(slots: int, strides, partial: bool) -> np.ndarray | None:
             # Random reads cost ~10 ms each: one block per slot, coarse to fine,
@@ -126,10 +139,11 @@ def compute_peaks(path: str, buckets: int = BUCKETS, *, first_frame: int = 0, en
                         return None
                     count = int(min(block_frames, max(slot_edges[i + 1] - slot_edges[i], 1)))
                     chunk = read_block(int(slot_edges[i]), count)
-                    if len(chunk):
-                        peak[:, i] = chunk.max(axis=0)
-                        sums[:, i] = (chunk.astype(np.float64) ** 2).sum(axis=0)
-                        counts[i] = len(chunk)
+                    count = len(chunk) // info.block_align
+                    if count:
+                        p, s = _reduce(chunk, info.bits, channels, is_float, np.array([0, count]))
+                        peak[:, i], sums[:, i] = p[:, 0], s[:, 0]
+                        counts[i] = count
                     done[i] = True
                 fill = np.maximum.accumulate(np.where(done, np.arange(slots), 0))
                 spread = np.minimum((np.arange(buckets) * slots) // buckets, slots - 1)
@@ -139,10 +153,13 @@ def compute_peaks(path: str, buckets: int = BUCKETS, *, first_frame: int = 0, en
                     on_partial(result)
             return result
 
-        if range_size > FULL_READ_LIMIT:
+        if range_size > FULL_READ_LIMIT and not full_read:
             return sampled(min(SAMPLED_SLOTS, buckets), (16, 4, 1), True)
 
-        if range_size > QUICK_PREVIEW_ABOVE and on_partial:
+        if preview is not None:
+            pick = np.minimum(np.arange(buckets) * preview.shape[2] // buckets, preview.shape[2] - 1)
+            preview = preview[..., pick]
+        elif range_size > QUICK_PREVIEW_ABOVE and on_partial:
             # A full read takes a second or two on the share; show a coarse
             # outline from a few spread-out blocks first.
             preview = sampled(min(QUICK_PREVIEW_SLOTS, buckets), (1,), False)
@@ -157,43 +174,68 @@ def compute_peaks(path: str, buckets: int = BUCKETS, *, first_frame: int = 0, en
         piece_frames = max(PIECE_BYTES // info.block_align, 1)
         f.seek(base)
         start = 0
+        last_partial = time.monotonic()
         while start < frames:
             if cancelled():
                 return None
             count = min(piece_frames, frames - start)
-            samples = np.abs(decode(f.read(count * info.block_align), info.bits, channels, is_float))
-            if not len(samples):
-                break
-            end = start + len(samples)
+            raw = f.read(count * info.block_align)
+            count = len(raw) // info.block_align
+            if not count:
+                raise bwf.WavError("audio ended before the waveform read completed")
+            end = start + count
             # Bucket k holds frames [ceil(k*frames/buckets), ceil((k+1)*frames/buckets)).
             first, last = (start * buckets) // frames, ((end - 1) * buckets) // frames
             ks = np.arange(first + 1, last + 1, dtype=np.int64)
-            cuts = np.concatenate([[0], -((-ks * frames) // buckets) - start]).astype(np.int64)
+            cuts = np.concatenate([[0], -((-ks * frames) // buckets) - start, [count]]).astype(np.int64)
             ids = np.arange(first, last + 1)
-            peak[:, ids] = np.maximum(peak[:, ids], np.maximum.reduceat(samples, cuts, axis=0).T)
-            sums[:, ids] += np.add.reduceat(samples.astype(np.float64) ** 2, cuts, axis=0).T
-            counts[ids] += np.diff(np.append(cuts, len(samples)))
+            p, s = _reduce(raw, info.bits, channels, is_float, cuts)
+            peak[:, ids] = np.maximum(peak[:, ids], p)
+            sums[:, ids] += s
+            counts[ids] += np.diff(cuts)
             start = end
-            if on_partial:
-                on_partial(_levels(peak, sums, counts))
+            now = time.monotonic()
+            if on_partial and (not full_read or end == frames or now - last_partial >= 0.25):
+                levels = _levels(peak, sums, counts)
+                if preview is not None:
+                    # Preserve the quick overview ahead of the detailed read;
+                    # only completed buckets replace it, without blanking it.
+                    finished = end * buckets // frames
+                    levels[..., finished:] = preview[..., finished:]
+                on_partial(levels)
+                last_partial = now
     return _levels(peak, sums, counts)
 
 
-def to_bytes(levels: np.ndarray) -> bytes:
-    """Compact form for the cache: magic, channel count, then uint8 peak and RMS levels."""
+def to_bytes(levels: np.ndarray, *, complete: bool = True) -> bytes:
+    """16-bit cached levels retain subpixel amplitude detail on high-DPI screens.
+
+    The quality flag distinguishes a full read from a sampled large-file preview.
+    """
     channels = levels.shape[1]
-    return MAGIC + bytes([channels]) + (levels * 255).round().astype(np.uint8).tobytes()
+    return MAGIC + bytes([channels, int(complete)]) + (levels * 65535).round().astype("<u2").tobytes()
 
 
 def from_bytes(data: bytes) -> np.ndarray | None:
-    """Levels from the cache, or None for a blob in an older format."""
-    if not data.startswith(MAGIC) or len(data) < len(MAGIC) + 1:
+    """Read current levels or a legacy 8-bit preview, without clearing the cache."""
+    if data.startswith(MAGIC):
+        header, dtype, maximum = len(MAGIC) + 2, "<u2", 65535.0
+    elif data.startswith(LEGACY_MAGIC):
+        header, dtype, maximum = len(LEGACY_MAGIC) + 1, "u1", 255.0
+    else:
+        return None
+    if len(data) <= header or (len(data) - header) % np.dtype(dtype).itemsize:
         return None
     channels = data[len(MAGIC)]
-    levels = np.frombuffer(data[len(MAGIC) + 1:], np.uint8).astype(np.float32) / 255.0
+    levels = np.frombuffer(data[header:], dtype).astype(np.float32) / maximum
     if not channels or len(levels) % (2 * channels):
         return None
     return levels.reshape(2, channels, -1)
+
+
+def is_complete(data: bytes) -> bool:
+    """Old/sampled caches can display immediately, then be refined on selection."""
+    return data.startswith(MAGIC) and len(data) > len(MAGIC) + 2 and data[len(MAGIC) + 1] == 1
 
 
 def to_linear(levels: np.ndarray) -> np.ndarray:

@@ -1,14 +1,13 @@
-"""The Offload page: card -> review & notes -> sound report -> copy to NAS -> open folder.
+"""The Offload page: card -> review & notes -> sound report -> copy to storage -> open folder.
 
 Nothing on the card is ever written. Edits made while reviewing are kept as
-pending changes and written into the NAS copies after they are verified.
+pending changes and written into storage copies after they are verified.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import os
-import traceback
 from collections import defaultdict
 from pathlib import Path
 
@@ -20,7 +19,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, compat, duplicates, offload, report, settings
+from . import bwf, catalog, compat, duplicates, offload, report, settings, card_safety, card_backup
+from .card_workspace import CardWorkspace
 from .catalog import Recording
 from .organize import MARKER_FILES
 from .dialogs import RewriteDialog, show_report
@@ -32,31 +32,191 @@ from .workers import run_job
 HIDDEN_COLUMNS = ("Format", "FPS", "Time", "Recorder", "Project", "Folder")
 FOLDER_ROLE = Qt.ItemDataRole.UserRole + 20
 DAY_ROLE = Qt.ItemDataRole.UserRole + 21
-STEPS = ["Card", "Review & notes", "Sound report", "Copy to NAS", "Send"]
+STEPS = ["Card", "Review & notes", "Sound report", "Copy to Storage", "Send"]
+
+
+class WorkingCopyDialog(QDialog):
+    """Visible immediately, including while the card is being listed."""
+
+    def __init__(self, card_label, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Making a local working copy")
+        self.setObjectName("workingCopyDialog")
+        self.setMinimumSize(520, 300)
+        self.resize(540, 320)
+        self.setStyleSheet("""
+            QDialog#workingCopyDialog { background-color: #493514; }
+            QDialog#workingCopyDialog QLabel { color: #fff4dc; background: transparent; }
+            QLabel#workingCopyHeading { color: #ffce70; font-size: 18px; font-weight: bold; }
+            QDialog#workingCopyDialog QProgressBar {
+                background-color: #2d2416; color: #ffffff;
+                border: 1px solid #bc9149; border-radius: 5px;
+                min-height: 24px; text-align: center;
+            }
+            QDialog#workingCopyDialog QProgressBar::chunk {
+                background-color: #9a6418; border-radius: 4px;
+            }
+            QDialog#workingCopyDialog QPushButton {
+                background-color: #62491f; color: #fff4dc;
+                border: 1px solid #d4ad67; border-radius: 4px; padding: 7px 18px;
+            }
+            QDialog#workingCopyDialog QPushButton:hover { background-color: #7b5a27; }
+            QDialog#workingCopyDialog QPushButton:focus { border: 2px solid #ffe0a0; }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        heading = QLabel("Please wait — preparing your card")
+        heading.setObjectName("workingCopyHeading")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        title = QLabel(f"Preparing {card_label}")
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        self.details = QLabel()
+        self.details.setTextFormat(Qt.TextFormat.PlainText)
+        self.details.setWordWrap(True)
+        self.details.setMinimumHeight(self.details.fontMetrics().lineSpacing() * 3 + 8)
+        layout.addWidget(self.details)
+        self.bar = QProgressBar()
+        layout.addWidget(self.bar)
+        hint = QLabel("Your card stays unchanged. Review starts when the local copy is ready.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.set_phase("Listing card files and checking available space…")
+
+    def set_phase(self, text):
+        self.bar.setRange(0, 0)
+        self.details.setText(text)
+
+    def update_progress(self, state):
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(min(1000, int(state.done_bytes * 1000 / state.total_bytes))
+                          if state.total_bytes else 0)
+        self.details.setText(
+            f"Copying {os.path.basename(state.current)}\n"
+            f"{state.done_files} of {state.total_files} files complete · "
+            f"{offload.human_size(state.done_bytes)} of {offload.human_size(state.total_bytes)}\n"
+            f"{offload.human_size(state.rate)}/s · {offload.human_time(state.eta)} remaining")
+
+
+class StorageDifferencesDialog(QDialog):
+    def __init__(self, differences, root, ignored, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Review new and different files")
+        self.resize(900, 460)
+        self.action = None
+        layout = QVBoxLayout(self)
+        hint = QLabel("Comparison uses the local working copy. Select files to copy or ignore for this card session. "
+                      "Copying keeps existing storage files and saves a separate copy when a name is already used.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["File", "Comparison", "Storage destination"])
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for difference in differences:
+            item = QTreeWidgetItem([compat.relpath(difference.src, root),
+                                   difference.reason + (" (ignored)" if difference.src in ignored else ""),
+                                   difference.dst])
+            item.setData(0, Qt.ItemDataRole.UserRole, difference)
+            for column in range(3):
+                item.setToolTip(column, item.text(column))
+            self.tree.addTopLevelItem(item)
+        self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.tree.setColumnWidth(0, 340)
+        self.tree.setColumnWidth(1, 180)
+        layout.addWidget(self.tree)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        copy = buttons.addButton("Copy selected (keep both)", QDialogButtonBox.ButtonRole.ActionRole)
+        ignore = buttons.addButton("Ignore selected for this card", QDialogButtonBox.ButtonRole.ActionRole)
+        copy.clicked.connect(lambda: self.choose("copy"))
+        ignore.clicked.connect(lambda: self.choose("ignore"))
+        copy.setEnabled(False)
+        ignore.setEnabled(False)
+        self.tree.itemSelectionChanged.connect(lambda: (
+            copy.setEnabled(bool(self.tree.selectedItems())), ignore.setEnabled(bool(self.tree.selectedItems()))))
+        layout.addWidget(buttons)
+
+    def choose(self, action):
+        self.action = action
+        self.accept()
+
+    def selected(self):
+        return [item.data(0, Qt.ItemDataRole.UserRole) for item in self.tree.selectedItems()]
+
+
+def difference_copy_plan(differences):
+    """Explicitly chosen files: keep existing destinations, including conflicts."""
+    result, used = [], set()
+    for difference in differences:
+        target = difference.dst
+        stem, ext = os.path.splitext(target)
+        number = 1
+        while os.path.lexists(target) or os.path.normcase(target) in used:
+            target = f"{stem} (card copy {number}){ext}"
+            number += 1
+        used.add(os.path.normcase(target))
+        result.append(offload.CopyItem(difference.src, target, os.path.getsize(difference.src)))
+    return result
 
 
 class CardReader(QThread):
-    """Reads every recording on the card (local and fast) off the GUI thread."""
+    """Prepare a local working copy before exposing recordings for review."""
+    done = Signal(object, object, str)
+    progress = Signal(object)
+    phase = Signal(str)
 
-    done = Signal(object, object, str)  # recordings, all files, error
-
-    def __init__(self, root: str, parent=None):
+    def __init__(self, root, folder, parent=None):
         super().__init__(parent)
-        self.root = root
+        self.root, self.folder = root, folder
+        self.workspace = None
 
     def run(self):
         try:
-            folders = {e.name for e in os.scandir(self.root) if e.is_dir() and not offload.is_system_folder(e.name)}
-            folders.add(offload.ROOT_FILES)
-            files = offload.card_files(self.root, folders, include_false_takes=True)
-            recs = [catalog.read_recording(p) for p in files if catalog.is_audio_file(os.path.basename(p))]
-            self.done.emit(recs, files, "")
-        except Exception as error:  # noqa: BLE001
-            self.done.emit([], [], f"{error}\n{traceback.format_exc()}")
+            self.workspace = CardWorkspace.prepare(
+                self.root, self.folder, cancelled=self.isInterruptionRequested,
+                progress=lambda state: self.progress.emit(dataclasses.replace(state)))
+            self.phase.emit("Reading recording details from the local copy…")
+            recs = []
+            for path in self.workspace.files:
+                if self.isInterruptionRequested():
+                    raise offload.CopyCancelled()
+                if catalog.is_audio_file(os.path.basename(path)):
+                    recs.append(catalog.read_recording(path))
+            self.done.emit(recs, self.workspace.files, "")
+        except offload.CopyCancelled:
+            self.done.emit([], [], "Working copy cancelled.")
+        except Exception as error:
+            self.done.emit([], [], str(error))
+
+
+class BackupChecker(QThread):
+    done = Signal(object, int)
+    progress = Signal(int, int, int)
+
+    def __init__(self, generation, plan, recs, library_recs, library, cache, parent=None):
+        super().__init__(parent)
+        self.generation = generation
+        self.args = (plan, recs, library_recs, library)
+        self.cache = cache
+
+    def run(self):
+        try:
+            result = card_backup.verify(*self.args, cache=self.cache,
+                cancelled=self.isInterruptionRequested,
+                progress=lambda n, total: self.progress.emit(n, total, self.generation))
+        except Exception:
+            result = None
+        self.done.emit(result, self.generation)
 
 
 class Planner(QThread):
-    """Checks which files are already on the NAS (a stat per file over the network)."""
+    """Checks which files are already in storage (a stat per file over the network)."""
 
     done = Signal(object, int)
 
@@ -71,13 +231,15 @@ class Planner(QThread):
         except OSError:
             self.done.emit([], self.generation)
             return
-        # A "conflict" is often the same recording: the NAS copy's metadata
+        # A "conflict" is often the same recording: storage copy's metadata
         # was written later (a few bytes longer or shorter) or only its date
-        # differs. The audio fingerprint tells; those count as on the NAS.
+        # differs. The audio fingerprint tells; those count as in storage.
         targets: dict[str, int] = {}
         for item in plan:
             targets[item.dst] = targets.get(item.dst, 0) + 1
         for item in plan:
+            if self.isInterruptionRequested():
+                return
             if item.status != "conflict" or targets[item.dst] > 1 or not catalog.is_audio_file(item.dst):
                 continue
             try:
@@ -210,6 +372,15 @@ class OffloadPage(QWidget):
         self.in_library_paths: set[str] = set()  # card recordings already somewhere in the library
         self.skip_folders: set[str] = set()  # card folders not to tick ("Don't copy")
         self._checked_card: str | None = None  # the card the library check ran for
+        self.workspace = None
+        self._working_dialog = None
+        self._differences = []
+        self._ignored_files = set()
+        self._differences_generation = -1
+        self._jobs = []
+        self._retired = []
+        self._checker = None
+        self._closing = False
         self.card: offload.Card | None = None
         self.files: list[str] = []
         self.plan: list[offload.CopyItem] = []
@@ -226,6 +397,9 @@ class OffloadPage(QWidget):
         self._card_timer = QTimer(self, interval=3000)
         self._card_timer.timeout.connect(self.refresh_cards)
         self._card_timer.start()
+        self._cleanup_timer = QTimer(self, interval=250)
+        self._cleanup_timer.timeout.connect(self._cleanup_workspaces)
+        self._cleanup_timer.start()
         self._plan_timer = QTimer(self, singleShot=True, interval=400)
         self._plan_timer.timeout.connect(self._replan)
         QTimer.singleShot(0, self.refresh_cards)
@@ -249,16 +423,19 @@ class OffloadPage(QWidget):
         top.addWidget(QLabel("<b>Card:</b>"))
         top.addWidget(self.card_box)
         top.addWidget(browse)
+        working_folder = QPushButton("Working Copy Folder…")
+        working_folder.clicked.connect(self._choose_working_folder)
+        top.addWidget(working_folder)
         top.addWidget(self.card_info, 1)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Card folder", "Files", "Status", "NAS folder"])
+        self.tree.setHeaderLabels(["Card folder", "Files", "Status", "Storage folder"])
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.tree.setToolTip("Check the days to copy. Double-click a NAS folder name to change it.")
+        self.tree.setToolTip("Check the days to copy. Double-click a storage folder name to change it.")
         self.tree.itemChanged.connect(self._tree_item_changed)
         self.tree.currentItemChanged.connect(lambda *_: self._apply_scope())
         self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
@@ -293,7 +470,7 @@ class OffloadPage(QWidget):
         self.table.customContextMenuRequested.connect(self._table_menu)
         review_hint = QLabel("Double-click (or F2) a <b>file name, scene, take or note</b> to change it; click "
                              "<b>★</b> to circle a take. Changes stay pending (shown in bold) and are written "
-                             "into the NAS copies; the card itself is never changed.")
+                             "into storage copies; the card itself is never changed.")
         review_hint.setWordWrap(True)
         review_hint.setEnabled(False)
         middle = QWidget()
@@ -319,6 +496,14 @@ class OffloadPage(QWidget):
         layout.setContentsMargins(6, 6, 6, 0)
         layout.addWidget(self.steps)
         layout.addLayout(top)
+        self.backup_notice = QLabel()
+        self.backup_notice.setWordWrap(True)
+        self.backup_notice.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(self.backup_notice)
+        self.review_differences = QPushButton("Review new / different files…")
+        self.review_differences.clicked.connect(self._review_storage_differences)
+        self.review_differences.hide()
+        layout.addWidget(self.review_differences)
         layout.addWidget(self.split, 1)
         self._update_steps()
 
@@ -349,7 +534,7 @@ class OffloadPage(QWidget):
         review_layout.addWidget(report_button)
 
         # 4 copy
-        copy = QGroupBox("Copy to NAS")
+        copy = QGroupBox("Copy to Storage")
         copy_layout = QVBoxLayout(copy)
         self.dest_box = QComboBox()
         self.dest_box.setToolTip("The folder the card's project folders are copied into")
@@ -371,11 +556,11 @@ class OffloadPage(QWidget):
         self.verify = QCheckBox("Verify every copy (read back and compare)")
         self.verify.setChecked(settings.get(self.qsettings, "verify_copies"))
         self.verify.toggled.connect(lambda on: settings.put(self.qsettings, "verify_copies", on))
-        self.save_report = QCheckBox("Save sound reports on the NAS")
+        self.save_report = QCheckBox("Save sound reports in storage")
         self.save_report.setChecked(settings.get(self.qsettings, "report_on_export"))
         self.save_report.toggled.connect(lambda on: (settings.put(self.qsettings, "report_on_export", on),
                                                      self._update_report_label()))
-        self.copy_button = QPushButton("Copy to NAS")
+        self.copy_button = QPushButton("Copy to Storage")
         font = self.copy_button.font()
         font.setBold(True)
         font.setPointSizeF(font.pointSizeF() * 1.2)
@@ -466,7 +651,10 @@ class OffloadPage(QWidget):
     def refresh_cards(self):
         if self._copy is not None:
             return
-        cards = [c for c in offload.removable_mounts() if offload.looks_like_card(c.path)]
+        detected = offload.removable_mounts()
+        for card in detected:
+            card_safety.protect(card.path)
+        cards = [c for c in detected if offload.looks_like_card(c.path)]
         if [c.path for c in cards] == [c.path for c in self._known_cards]:
             return
         new = [c for c in cards if c.path not in {k.path for k in self._known_cards}]
@@ -504,6 +692,8 @@ class OffloadPage(QWidget):
     def open_card(self, card: offload.Card):
         if self._copy is not None:
             return
+        self.close_card()
+        card_safety.protect(card.path)
         # Forget the previous card's files before anything refers to the new one.
         self.model.set_recordings([], card.path)
         self.card = card
@@ -517,17 +707,97 @@ class OffloadPage(QWidget):
         self.model.clear_pending()
         self.model.set_recordings([], card.path)
         self.tree.clear()
-        self.card_info.setText("Reading the card…")
+        self.card_info.setText("Making a local working copy…")
+        self.backup_notice.setText("The card is protected. Review starts when copying finishes.")
         index = self.card_box.findData(card)
         if index >= 0:
             self.card_box.setCurrentIndex(index)
-        reader = CardReader(card.path, self)
+        folder = settings.get(self.qsettings, "card_working_folder") or str(settings.cache_path().parent / "card-work")
+        reader = CardReader(card.path, folder, self)
+        reader.progress.connect(lambda state, r=reader: self._staging_progress(state, r))
+        self._jobs.append(reader)
+        self.progress.setVisible(True)
+        self.progress_label.setVisible(True)
+        self.cancel_button.setVisible(True)
         reader.done.connect(lambda recs, files, error, r=reader: self._card_read(recs, files, error, r))
         self._reader = reader
+        dialog = WorkingCopyDialog(card.label, self)
+        self._working_dialog = dialog
+        dialog.rejected.connect(lambda r=reader: self._cancel_staging(r))
+        reader.phase.connect(lambda text, r=reader: self._staging_phase(text, r))
+        dialog.show()
         self._reader.start()
         self._update_panel()
 
+    @property
+    def work_root(self):
+        return self.workspace.root if self.workspace else ""
+
+    def _choose_working_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Local folder for temporary card copies",
+            settings.get(self.qsettings, "card_working_folder") or str(settings.cache_path().parent))
+        if folder:
+            try:
+                card_safety.assert_writable(folder)
+            except OSError as error:
+                QMessageBox.warning(self, "Working copy", str(error))
+                return
+            settings.put(self.qsettings, "card_working_folder", folder)
+            if self.card and self._copy is None:
+                self.open_card(self.card)
+
+    def _cancel_staging(self, reader):
+        if reader is self._reader:
+            self._cancel_copy()
+
+    def _close_working_dialog(self):
+        dialog, self._working_dialog = self._working_dialog, None
+        if dialog is not None:
+            dialog.accept()
+            dialog.deleteLater()
+
+    def _staging_phase(self, text, reader):
+        if reader is self._reader and self._working_dialog is not None:
+            self._working_dialog.set_phase(text)
+
+    def _staging_progress(self, state, reader):
+        if reader is self._reader:
+            self._copy_progress(state)
+            if self._working_dialog is not None:
+                self._working_dialog.update_progress(state)
+
+    def _cleanup_workspaces(self):
+        remaining = []
+        for workspace, jobs in self._retired:
+            if any(job.isRunning() for job in jobs):
+                remaining.append((workspace, jobs))
+                continue
+            copies = [workspace] + [j.workspace for j in jobs if isinstance(j, CardReader)]
+            for copy in {id(c): c for c in copies if c is not None}.values():
+                try:
+                    copy.close()
+                except OSError:
+                    remaining.append((copy, []))
+            for job in jobs:
+                job.deleteLater()
+        self._retired = remaining
+
     def close_card(self, message: str = ""):
+        if self._copy is not None:
+            return
+        self._plan_timer.stop()
+        self._differences = []
+        self._ignored_files.clear()
+        self.review_differences.hide()
+        self._close_working_dialog()
+        self.releaseCard.emit()
+        for job in self._jobs:
+            job.requestInterruption()
+        self._retired.append((self.workspace, self._jobs))
+        self._jobs = []
+        self.workspace = None
+        self._checker = None
+        self._planner = None
         self.card = None
         self._reader = None
         self._plan_generation += 1
@@ -536,26 +806,43 @@ class OffloadPage(QWidget):
         self.model.set_recordings([], "")
         self.tree.clear()
         self.card_info.setText(message)
+        self.backup_notice.clear()
+        self.progress.hide()
+        self.progress_label.hide()
+        self.cancel_button.hide()
         self.recordingSelected.emit(None)
         self._update_panel()
 
     def _card_read(self, recs, files, error, reader=None):
         if reader is not self._reader or self.card is None or reader.root != self.card.path:
             return  # a read of a card that is no longer shown
+        reader.wait()
+        self._close_working_dialog()
         self._reader = None
+        self.progress.hide()
+        self.progress_label.hide()
+        self.cancel_button.hide()
         if error:
-            self.card_info.setText("Could not read the card.")
+            if reader.workspace:
+                reader.workspace.close()
+                reader.workspace = None
+            self.card_info.setText("Working copy unavailable.")
+            self.backup_notice.setText(error)
+            self._update_panel()
             QMessageBox.warning(self, "Offload", f"Could not read the card:\n{error}")
             return
-        catalog.assign_projects(recs, self.card.path, [])
+        self.workspace = reader.workspace
+        catalog.assign_projects(recs, self.work_root, [])
         self.files = files
-        self.model.set_recordings(recs, self.card.path)
-        total = sum(os.path.getsize(p) for p in files)
+        self.model.set_recordings(recs, self.work_root)
+        total = self.workspace.total_bytes
         recorders = sorted({report.recorder_name(r.recorder) for r in recs if r.recorder})
         self.card_info.setText(f"{len(recs)} recordings, {offload.human_size(total)}"
                                + (f" · {', '.join(recorders)}" if recorders else ""))
         self._fill_tree(recs)
-        self.check_library_projects()
+        if not files:
+            self.backup_notice.setText("No recordings or accompanying files were found on this card.")
+            self._update_panel()
         self._replan()
 
     def check_library_projects(self, only: str | None = None) -> None:
@@ -571,8 +858,8 @@ class OffloadPage(QWidget):
             self._checked_card = self.card.path
             self.in_library_paths = duplicates.recordings_in_library(recs, library_recs)
         if not destination or not self.in_library(destination):
-            return  # NAS folder names are relative to a destination outside the library
-        card_root = self.card.path
+            return  # storage folder names are relative to a destination outside the library
+        card_root = self.work_root
         matches = duplicates.card_project_matches(
             recs, lambda r: offload.project_folder(r.path, card_root), library_recs, library,
             settings.get(self.qsettings, "container_folders"))
@@ -607,10 +894,10 @@ class OffloadPage(QWidget):
         before the library was there, and set its default ticks again."""
         if self.card is None or self._reader is not None or self._copy is not None or not self.model.recs:
             return
-        if self._checked_card == self.card.path or not self.library_recs():
+        if not self.library_recs():
             return
-        self.check_library_projects()
-        self.plan = []  # the next plan sets the default ticks again
+        self._plan_generation += 1
+        self.backup_notice.clear()
         self._plan_timer.start()
 
     def _tree_folder_item(self, folder: str) -> QTreeWidgetItem | None:
@@ -646,13 +933,13 @@ class OffloadPage(QWidget):
 
     def _fill_tree(self, recs: list[Recording]):
         remembered = settings.get_json(self.qsettings, "offload_folder_names")
-        by_folder: dict[str, dict[str, list[Recording]]] = defaultdict(lambda: defaultdict(list))
-        for rec in recs:
-            folder = offload.project_folder(rec.path, self.card.path)
-            by_folder[folder][offload.day_folder(rec.path, self.card.path)].append(rec)
+        by_folder = defaultdict(lambda: defaultdict(list))
+        for path in self.files:
+            folder = offload.project_folder(path, self.work_root)
+            by_folder[folder][offload.day_folder(path, self.work_root)].append(path)
         self.tree.blockSignals(True)
         self.tree.clear()
-        everything = QTreeWidgetItem(["All folders", str(len(recs)), "", ""])
+        everything = QTreeWidgetItem(["All folders", str(len(self.files)), "", ""])
         everything.setData(0, FOLDER_ROLE, None)
         self.tree.addTopLevelItem(everything)
         for folder in sorted(by_folder, key=lambda f: (f in (offload.FALSE_TAKES, offload.ROOT_FILES), f.casefold())):
@@ -697,8 +984,13 @@ class OffloadPage(QWidget):
             remembered = settings.get_json(self.qsettings, "offload_folder_names")
             remembered[item.data(0, FOLDER_ROLE)] = name
             settings.put_json(self.qsettings, "offload_folder_names", remembered)
-        self._plan_timer.start()
+        if column == 3:
+            self._plan_generation += 1
+            self.plan = []
+            self.backup_notice.clear()
+            self._plan_timer.start()
         self._apply_scope()
+        self._update_panel()
 
     def folder_names(self) -> dict[str, str]:
         names = {}
@@ -719,8 +1011,8 @@ class OffloadPage(QWidget):
 
     def _file_selected(self, path: str, days: set[tuple[str, str]]) -> bool:
         try:
-            folder = offload.project_folder(path, self.card.path)
-            day = offload.day_folder(path, self.card.path)
+            folder = offload.project_folder(path, self.work_root)
+            day = offload.day_folder(path, self.work_root)
         except ValueError:
             return False  # not on this card
         if (folder, day) in days:
@@ -728,7 +1020,7 @@ class OffloadPage(QWidget):
         # Files directly in a project folder (recorder CSV reports, markers) go
         # along when any day of that project is copied.
         return day == "" and any(f == folder for f, _ in days) and os.path.dirname(path) == compat.join(
-            self.card.path, folder)
+            self.work_root, folder)
 
     def _apply_scope(self):
         item = self.tree.currentItem()
@@ -740,8 +1032,8 @@ class OffloadPage(QWidget):
         for rec in self.model.recs:
             if folder is None:
                 paths.add(rec.path)
-            elif offload.project_folder(rec.path, self.card.path) == folder and (
-                    day is None or offload.day_folder(rec.path, self.card.path) == day):
+            elif offload.project_folder(rec.path, self.work_root) == folder and (
+                    day is None or offload.day_folder(rec.path, self.work_root) == day):
                 paths.add(rec.path)
         self.proxy.set_allowed(paths)
 
@@ -794,6 +1086,9 @@ class OffloadPage(QWidget):
 
     def _destination_changed(self):
         self.last_folders = []
+        self.plan = []
+        self._plan_generation += 1
+        self.backup_notice.clear()
         self._plan_timer.start()
         self._update_panel()
 
@@ -804,20 +1099,39 @@ class OffloadPage(QWidget):
     # ------------------------------------------------------------ plan
 
     def _replan(self):
-        if self.card is None or not self.files:
+        if self.card is None or self.workspace is None or not self.files:
             return
+        self._plan_generation += 1
+        if self._checker:
+            self._checker.requestInterruption()
+        self.backup_notice.setText(f"Checking which card files are stored in {self._verification_storage_name()}…")
+        if self._planner:
+            self._planner.requestInterruption()
+        self._planner = None
         library = self.destination()
+        try:
+            card_safety.assert_writable(library)
+        except OSError as error:
+            self.plan = []
+            self.backup_notice.setText(str(error))
+            self._update_panel()
+            return
         if not library or not os.path.isdir(library):
+            self.plan = []
+            self.backup_notice.setText("Storage verification unavailable: the destination is not mounted.")
+            self._update_panel()
             self.summary.setText("<span style='color:#d13438'>The destination folder is not available. "
-                                 "Is the NAS mounted?</span>")
+                                 "Is the storage drive connected?</span>")
             return
         new_names = dict(self.done_names)
         new_names.update({path: changes["name"] for path, changes in self.model.pending.items() if "name" in changes})
         self._plan_generation += 1
-        self._planner = Planner(self._plan_generation, self.files, self.card.path, library, self.folder_names(),
+        self._planner = Planner(self._plan_generation, self.files, self.work_root, library, self.folder_names(),
                                 new_names, self)
         self._planner.done.connect(self._planned)
+        self._jobs.append(self._planner)
         self._planner.start()
+        self._update_panel()
 
     def _planned(self, plan, generation):
         if generation != self._plan_generation:
@@ -825,19 +1139,26 @@ class OffloadPage(QWidget):
         self._planner = None
         first_plan = not self.plan
         self.plan = plan
+        checker = BackupChecker(generation, list(plan), list(self.model.recs), list(self.library_recs()),
+                                self.library() or self.destination(), self.workspace.verified_matches, self)
+        self._checker = checker
+        self._jobs.append(checker)
+        checker.done.connect(self._backup_checked)
+        checker.progress.connect(self._backup_progress)
+        checker.start()
         by_src = {item.src: item for item in plan}
         status = {}
         for rec in self.model.recs:
             item = by_src.get(rec.path)
             if item is None:
                 continue
-            status[rec.path] = {"new": "new", "same": "on NAS", "same audio": "on NAS (same audio, metadata differs)",
-                                "conflict": "conflict: different file on NAS"}[item.status]
+            status[rec.path] = {"new": "new", "same": "in storage", "same audio": "in storage (same audio, metadata differs)",
+                                "conflict": "conflict: different file in storage"}[item.status]
             if item.status == "new" and rec.path in self.in_library_paths:
                 status[rec.path] = "in library (elsewhere)"
         self.model.set_status(status)
         # Tree status per day, and default ticks on first read: days with
-        # anything new are ticked, days already on the NAS are not.
+        # anything new are ticked, days already in storage are not.
         self.tree.blockSignals(True)
         for i in range(1, self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
@@ -845,10 +1166,10 @@ class OffloadPage(QWidget):
             for j in range(item.childCount()):
                 child = item.child(j)
                 day = child.data(0, DAY_ROLE)
-                items = [p for p in plan if offload.project_folder(p.src, self.card.path) == folder
-                         and offload.day_folder(p.src, self.card.path) == day]
+                items = [p for p in plan if offload.project_folder(p.src, self.work_root) == folder
+                         and offload.day_folder(p.src, self.work_root) == day]
                 # Recorder marker files (.daily_folder…) don't make a day new: merges
-                # and empty-folder cleanup remove them from the NAS.
+                # and empty-folder cleanup remove them from storage.
                 new = sum(1 for p in items if p.status == "new" and os.path.basename(p.src) not in MARKER_FILES)
                 conflicts = sum(1 for p in items if p.status == "conflict")
                 # Recordings the library already has in another folder: copying them
@@ -864,7 +1185,7 @@ class OffloadPage(QWidget):
                 elif new:
                     text = f"{new} new"
                 else:
-                    text = "on NAS"
+                    text = "in storage"
                 child.setText(2, text)
                 child.setToolTip(2, "These recordings are already in the library, in another folder"
                                  if elsewhere else "")
@@ -880,9 +1201,59 @@ class OffloadPage(QWidget):
         self.tree.blockSignals(False)
         self._update_panel()
 
+    def _verification_storage_name(self):
+        path = (self.library() or self.destination() or "").rstrip("/")
+        return os.path.basename(path) or path or "Storage"
+
+    def _backup_progress(self, done, total, generation):
+        if generation == self._plan_generation:
+            self.backup_notice.setText(f"Verifying card contents in {self._verification_storage_name()}: {done} of {total} files…")
+
+    def _backup_checked(self, result, generation):
+        if generation != self._plan_generation or self._closing:
+            return
+        self._differences = result.differences if result else []
+        self._differences_generation = generation
+        self.review_differences.setVisible(bool(self._differences))
+        self.review_differences.setText(f"Review {len(self._differences)} new / different / unverified files…")
+        if result and result.complete and result.total == len(self.files):
+            self.backup_notice.setText(
+                f"Already stored in {self._verification_storage_name()}: all {result.total} recordings and accompanying files match in full. "
+                "This card does not need offloading. Recorder/system files are excluded.")
+        else:
+            matched = result.matched if result else 0
+            self.backup_notice.setText(f"{matched} of {len(self.files)} card files verified in {self._verification_storage_name()}. "
+                "Review the listed files to copy or ignore them. Different files may have changed metadata.")
+            if self._copy is None and self._checked_card != (self.card.path if self.card else None):
+                self.check_library_projects()
+
+    def _review_storage_differences(self):
+        if self._copy is not None or self._differences_generation != self._plan_generation or not self.workspace:
+            return
+        generation = self._plan_generation
+        dialog = StorageDifferencesDialog(self._differences, self.work_root, self._ignored_files, self)
+        accepted = dialog.exec()
+        chosen, action = dialog.selected(), dialog.action
+        dialog.deleteLater()
+        if not accepted or generation != self._plan_generation or not chosen:
+            return
+        if action == "ignore":
+            self._ignored_files.update(item.src for item in chosen)
+            self.backup_notice.setText(f"{len(self._ignored_files)} files ignored for this card session. "
+                                      "Ignored files are not confirmed stored and will be skipped when copying.")
+            self._update_panel()
+        elif action == "copy":
+            try:
+                plan = difference_copy_plan(chosen)
+            except OSError as error:
+                QMessageBox.warning(self, "Copy to Storage", str(error))
+                return
+            self._ignored_files.difference_update(item.src for item in chosen)
+            self.start_copy(items=plan)
+
     def selected_plan(self) -> list[offload.CopyItem]:
         days = self.checked_days()
-        return [item for item in self.plan if self._file_selected(item.src, days)]
+        return [item for item in self.plan if item.src not in self._ignored_files and self._file_selected(item.src, days)]
 
     # ------------------------------------------------------------ review
 
@@ -910,6 +1281,9 @@ class OffloadPage(QWidget):
 
     def _pending_changed(self):
         if any("name" in c for c in self.model.pending.values()):
+            self.plan = []
+            self._plan_generation += 1
+            self.backup_notice.clear()
             self._plan_timer.start()
         self._update_panel()
 
@@ -920,14 +1294,14 @@ class OffloadPage(QWidget):
 
     def selected_recordings(self, effective: bool = True) -> list[Recording]:
         days = self.checked_days()
-        recs = [r for r in self.model.recs if not r.error and self._file_selected(r.path, days)]
+        recs = [r for r in self.model.recs if not r.error and r.path not in self._ignored_files and self._file_selected(r.path, days)]
         return [self.model.effective(r) for r in recs] if effective else recs
 
     def report_groups(self) -> list[ReportGroup]:
         """One report per checked card project, with only that project's files."""
         by_folder: dict[str, list[Recording]] = defaultdict(list)
         for rec in self.selected_recordings():  # a pending rename keeps the file in its folder
-            by_folder[offload.project_folder(rec.path, self.card.path)].append(rec)
+            by_folder[offload.project_folder(rec.path, self.work_root)].append(rec)
         names = self.folder_names()
         groups = []
         for folder in sorted(by_folder, key=str.casefold):
@@ -967,8 +1341,9 @@ class OffloadPage(QWidget):
             self.report_label.setText(f"Sound reports: <b>{ready} of {len(groups)}</b> filled in; saved in {where}.")
 
     def _update_panel(self):
+        self.review_differences.setEnabled(self._copy is None and self._differences_generation == self._plan_generation)
         pending = len(self.model.pending)
-        self.pending_label.setText(f"<b>{pending}</b> file(s) with changes; they are written into the NAS copies."
+        self.pending_label.setText(f"<b>{pending}</b> file(s) with changes; they are written into storage copies."
                                    if pending else "No changes. Double-click a note, scene or take to edit it.")
         self.discard_button.setEnabled(bool(pending))
         self._update_report_label()
@@ -981,7 +1356,7 @@ class OffloadPage(QWidget):
             self.dest_label.setText("Inside the library, so the copies show up there.")
         else:
             self.dest_label.setText("Outside the library folder: the copies won't show in the Library page.")
-        busy = self._copy is not None
+        busy = self._copy is not None or self._reader is not None or self._planner is not None
         if self.card is None:
             self.summary.setText("Insert a card or choose a folder.")
             self.copy_button.setEnabled(False)
@@ -993,17 +1368,17 @@ class OffloadPage(QWidget):
             size = sum(i.size for i in new)
             text = f"<b>{len(new)}</b> file(s) to copy ({offload.human_size(size)})"
             if same:
-                text += f", {len(same)} already on the NAS (skipped)"
+                text += f", {len(same)} already in storage (skipped)"
             if conflicts:
                 text += (f", <span style='color:#d13438'><b>{len(conflicts)} conflict(s)</b>: a different file "
-                         "with the same name is on the NAS. They are skipped; rename them (File column) "
-                         "or change the NAS folder.</span>")
+                         "with the same name is in storage. They are skipped; rename them (File column) "
+                         "or change storage folder.</span>")
             if not chosen:
                 text = "Check the days to copy in the list on the left."
             self.summary.setText(text)
             touched = [i for i in chosen if i.src in self.model.pending and i.status != "conflict"]
             self.copy_button.setEnabled(not busy and bool(new or touched))
-        self.report_button.setEnabled(self.card is not None and not busy)
+        self.report_button.setEnabled(self.workspace is not None and not busy)
         self.eject_button.setEnabled(self.card is not None and bool(self.card.device) and not busy)
         self.tree.setEnabled(not busy)
         self.dest_box.setEnabled(not busy)
@@ -1012,8 +1387,19 @@ class OffloadPage(QWidget):
 
     # ------------------------------------------------------------ copy
 
-    def start_copy(self):
-        chosen = self.selected_plan()
+    def start_copy(self, checked=False, *, items=None):
+        if self.workspace is None or self._reader is not None or self._planner is not None:
+            return
+        try:
+            card_safety.assert_writable(self.destination(), *(i.dst for i in (items if items is not None else self.selected_plan())))
+        except OSError as error:
+            QMessageBox.warning(self, "Copy to Storage", str(error))
+            return
+        self._plan_generation += 1
+        if self._checker:
+            self._checker.requestInterruption()
+        self.backup_notice.setText("Storage contents will be checked again after copying.")
+        chosen = items if items is not None else self.selected_plan()
         pending = dict(self.model.pending)
         recs_by_path = {r.path: r for r in self.model.recs}
         branding = load_branding(self.qsettings)
@@ -1023,7 +1409,7 @@ class OffloadPage(QWidget):
             info.branding = branding
             infos[group.key] = info
         per_day = self.report_per.currentData() == "day"
-        names, library, card_root = self.folder_names(), self.destination(), self.card.path
+        names, library, card_root = self.folder_names(), self.destination(), self.work_root
         make_report = self.save_report.isChecked()
         verify = self.verify.isChecked()
         embed = settings.get(self.qsettings, "write_embedded_filename")
@@ -1039,7 +1425,7 @@ class OffloadPage(QWidget):
             result = offload.copy_items(chosen, verify=verify, progress=job.progress.emit,
                                         cancelled=lambda: job.cancelled)
             done = {i.src: i for i in result.copied + [i for i in result.skipped if i.on_nas]}
-            # Write the review changes into the NAS copies.
+            # Write the review changes into storage copies.
             written, need_rewrite, errors = [], [], []
             for src, changes in pending.items():
                 item = done.get(src)
@@ -1055,7 +1441,7 @@ class OffloadPage(QWidget):
                     need_rewrite.append((item, fields, name))
                 except (OSError, bwf.WavError) as error:
                     errors.append(f"{os.path.basename(item.dst)}: changes not written ({error})")
-            # One sound report per project (in its NAS folder), or per day folder.
+            # One sound report per project (in its storage folder), or per day folder.
             reports = []
             if make_report and not job.cancelled:
                 groups: dict[tuple[str, str], list[Recording]] = defaultdict(list)
@@ -1104,6 +1490,9 @@ class OffloadPage(QWidget):
         self._copy.start()
 
     def _cancel_copy(self):
+        if self._reader is not None:
+            self.close_card("Working copy cancelled; the card was not changed.")
+            return
         if self._copy is not None:
             self._copy.cancelled = True
             self.progress_label.setText("Stopping after the current file…")
@@ -1118,13 +1507,15 @@ class OffloadPage(QWidget):
             f"{offload.human_size(state.rate)}/s · {offload.human_time(state.eta)} left")
 
     def _copy_finished(self, outcome, chosen, pending):
+        if self._closing:
+            return
         thread, self._copy = self._copy, None
         thread.wait()
         self.progress.setVisible(False)
         self.progress_label.setVisible(False)
         self.cancel_button.setVisible(False)
         if isinstance(outcome, Exception):
-            QMessageBox.warning(self, "Copy to NAS", f"The copy stopped with an error:\n{outcome}")
+            QMessageBox.warning(self, "Copy to Storage", f"The copy stopped with an error:\n{outcome}")
             self._update_panel()
             self._replan()
             return
@@ -1147,12 +1538,15 @@ class OffloadPage(QWidget):
             else:
                 errors += [f"{os.path.basename(i.dst)}: changes skipped (would need a full rewrite)"
                            for i, _, _ in need_rewrite]
-        # The card is unchanged; the edits now live in the NAS copies. Renamed
+        # The card is unchanged; the edits now live in storage copies. Renamed
         # files keep mapping to their new name so they show as already copied.
         for item in written:
             name = pending.get(item.src, {}).get("name")
             if name:
                 self.done_names[item.src] = name
+        for item in result.copied:
+            if os.path.basename(item.dst) != os.path.basename(item.src):
+                self.done_names[item.src] = os.path.basename(item.dst)
         self.model.clear_pending([i.src for i in written])
         library = self.destination()
         folders = []
@@ -1175,10 +1569,10 @@ class OffloadPage(QWidget):
         self.open_button.setEnabled(bool(folders))
         self.library_button.setEnabled(bool(folders) and self.in_library(library))
         self.log.emit("offload", {"card": self.card.path if self.card else "",
-                                  "copied": [[i.src, i.dst] for i in result.copied],
+                                  "copied": [[self.workspace.original_path(i.src), i.dst] for i in result.copied],
                                   "changes_written": [i.dst for i in written], "reports": reports})
         if lines:
-            show_report(self, "Copy to NAS", summary.replace("<b>", "").replace("</b>", ""), lines)
+            show_report(self, "Copy to Storage", summary.replace("<b>", "").replace("</b>", ""), lines)
         if self.in_library(library):
             self.copiedToLibrary.emit(folders)
         self._replan()
@@ -1213,12 +1607,31 @@ class OffloadPage(QWidget):
         self._known_cards = [c for c in self._known_cards if c.label != label]
 
     def is_card_path(self, path: str) -> bool:
-        return self.card is not None and path.startswith(self.card.path.rstrip("/") + "/")
+        return self.card is not None and (card_safety.below(path, self.card.path)
+            or bool(self.workspace and card_safety.below(path, self.workspace.root)))
+
+    def shutdown(self):
+        self._closing = True
+        self._card_timer.stop()
+        self._cleanup_timer.stop()
+        if self._copy:
+            self._copy.cancelled = True
+            self._copy.wait()
+            self._copy = None
+        self.close_card()
+        for _, jobs in self._retired:
+            for job in jobs:
+                job.requestInterruption()
+        for _, jobs in self._retired:
+            for job in jobs:
+                job.wait()
+        self._cleanup_workspaces()
 
 
 def _keep_card_dates(src: str, dst: str) -> None:
     """After writing metadata into a copy, give it the card file's date again so
     a later offload of the same card still recognises it as already copied."""
+    card_safety.assert_writable(dst)
     stat = os.stat(src)
     os.utime(dst, (stat.st_atime, stat.st_mtime))
 

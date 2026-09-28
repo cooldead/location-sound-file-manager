@@ -57,6 +57,7 @@ class RecordingsModel(QAbstractTableModel):
         self.status: dict[str, str] = {}  # path -> text for the Status column
         self._row_of: dict[str, int] = {}
         self._keys: dict[tuple[int, int], object] = {}  # sort keys; sorting 21k rows asks millions of times
+        self._search: dict[int, str] = {}
 
     def effective(self, rec: Recording) -> Recording:
         changes = self.pending.get(rec.path)
@@ -96,6 +97,7 @@ class RecordingsModel(QAbstractTableModel):
     def _changed(self, path: str) -> None:
         row = self._row_of.get(path)
         if row is not None:
+            self._search.pop(row, None)
             for col in range(len(COLUMNS)):
                 self._keys.pop((row, col), None)
             self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLUMNS) - 1))
@@ -140,6 +142,7 @@ class RecordingsModel(QAbstractTableModel):
         self.root = root
         self._row_of = {r.path: i for i, r in enumerate(recs)}
         self._keys.clear()
+        self._search.clear()
         self.endResetModel()
 
     def append(self, recs: list[Recording]):
@@ -160,6 +163,7 @@ class RecordingsModel(QAbstractTableModel):
         if row is None:
             return
         self.recs[row] = rec
+        self._search.pop(row, None)
         self._row_of[rec.path] = row
         for col in range(len(COLUMNS)):
             self._keys.pop((row, col), None)
@@ -222,7 +226,7 @@ class RecordingsModel(QAbstractTableModel):
             text = self.status[original.path]
             if text.startswith(("conflict", "failed")):
                 return QBrush(QColor("#d13438"))
-            if text.startswith(("on NAS", "copied")):
+            if text.startswith(("in storage", "copied")):
                 return QBrush(QApplication.palette().color(QPalette.ColorRole.PlaceholderText))
         if role == Qt.ItemDataRole.ForegroundRole:
             if rec.error or (col == COL["Project"] and rec.project_from == "folder"):
@@ -241,14 +245,37 @@ class RecordingsModel(QAbstractTableModel):
         if rec.error:
             return {COL["Note"]: "⚠ " + rec.error, COL["Folder"]: self._folder(rec),
                     COL["Project"]: rec.project}.get(col, "")
-        return {
-            COL["Scene"]: rec.scene, COL["Take"]: rec.take, COL["★"]: "★" if rec.circled else "",
-            COL["Start TC"]: rec.start_tc, COL["Length"]: format_duration(rec.duration),
-            COL["Ch"]: str(rec.channels), COL["Tracks"]: ", ".join(t for t in rec.tracks if t),
-            COL["Format"]: rec.format_label + (" · RF64" if rec.form in ("RF64", "BW64") else ""),
-            COL["FPS"]: rec.rate_label, COL["Date"]: rec.date, COL["Time"]: rec.time, COL["Note"]: rec.note,
-            COL["Recorder"]: rec.recorder, COL["Project"]: rec.project, COL["Folder"]: self._folder(rec),
-        }.get(col, "")
+        # Only format the requested cell: constructing a dict eagerly computed
+        # timecode, FPS and relative paths even when painting a plain scene.
+        field = {COL["Scene"]: "scene", COL["Take"]: "take", COL["Date"]: "date",
+                 COL["Time"]: "time", COL["Note"]: "note", COL["Recorder"]: "recorder",
+                 COL["Project"]: "project"}.get(col)
+        if field:
+            return getattr(rec, field)
+        if col == COL["★"]:
+            return "★" if rec.circled else ""
+        if col == COL["Start TC"]:
+            return rec.start_tc
+        if col == COL["Length"]:
+            return format_duration(rec.duration)
+        if col == COL["Ch"]:
+            return str(rec.channels)
+        if col == COL["Tracks"]:
+            return ", ".join(t for t in rec.tracks if t)
+        if col == COL["Format"]:
+            return rec.format_label + (" · RF64" if rec.form in ("RF64", "BW64") else "")
+        if col == COL["FPS"]:
+            return rec.rate_label
+        if col == COL["Folder"]:
+            return self._folder(rec)
+        return ""
+
+    def search_text(self, row: int) -> str:
+        if row not in self._search:
+            rec = self.recs[row]
+            self._search[row] = " ".join((rec.name, rec.scene, rec.take, rec.note, rec.project, rec.tape,
+                                         " ".join(rec.tracks), rec.folder, rec.start_tc)).casefold()
+        return self._search[row]
 
     def _folder(self, rec: Recording) -> str:
         if self.root:
@@ -290,6 +317,7 @@ class RecordingsProxy(QSortFilterProxyModel):
         self.period: str | None = None  # a year / month (see in_period)
         self.recorder: str | None = None  # a recorder_label
         self.text = ""
+        self._words = []
         self.circled_only = False
         self.allowed: set[str] | None = None  # only these paths (the Offload page's tree selection)
 
@@ -304,6 +332,7 @@ class RecordingsProxy(QSortFilterProxyModel):
 
     def set_text(self, text: str):
         self.text = text.casefold().strip()
+        self._words = self.text.split()
         self.invalidateFilter()
 
     def set_circled_only(self, value: bool):
@@ -325,9 +354,8 @@ class RecordingsProxy(QSortFilterProxyModel):
         if self.circled_only and not rec.circled:
             return False
         if self.text:
-            haystack = " ".join((rec.name, rec.scene, rec.take, rec.note, rec.project, rec.tape,
-                                 " ".join(rec.tracks), rec.folder, rec.start_tc)).casefold()
-            return all(word in haystack for word in self.text.split())
+            haystack = self.sourceModel().search_text(row)
+            return all(word in haystack for word in self._words)
         return True
 
     def lessThan(self, left, right):
