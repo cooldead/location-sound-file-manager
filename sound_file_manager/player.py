@@ -781,6 +781,10 @@ class PlayerWidget(QWidget):
         bold.setBold(True)
         self.title.setFont(bold)
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # A long file name is cut off rather than widening the window: a larger
+        # minimum width resizes the window, which takes macOS out of full screen.
+        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.title.setMinimumWidth(80)
 
         self.view_overlay = QToolButton()
         self.view_overlay.setText("Combined")
@@ -853,6 +857,8 @@ class PlayerWidget(QWidget):
         self.tc_label.setFont(mono)
         self.tc_label.setStyleSheet("color: #35d04a;")
         self.tc_label.setToolTip("Timecode at the playhead")
+        # Room for digits up front, so the header doesn't widen when a file loads.
+        self.tc_label.setMinimumWidth(self.tc_label.fontMetrics().horizontalAdvance("TC 00:00:00:00") + 4)
         self.region_label = QLabel("")
         self.region_label.setToolTip("The selected region. Double-click the waveform or press Esc to clear it.")
 

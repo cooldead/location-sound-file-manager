@@ -233,7 +233,11 @@ class ChannelStrip(QFrame):
                                         "move together, panned left / right)")
         self.link.setFixedSize(QSize(22, 18))
         self.link.setStyleSheet(BUTTON_STYLE.format(on="#35d04a", text="black"))
-        self.link.setVisible(can_link)
+        if not can_link:
+            # Only ever hide it here: setVisible(True) on a widget without a parent
+            # shows it as its own window for a moment, and on macOS a new window
+            # takes the app out of full screen each time a file is selected.
+            self.link.hide()
         self.pan = PanSlider()
         self.pan_label = QLabel("C")
         self.pan_label.setAlignment(Qt.AlignmentFlag.AlignCenter)

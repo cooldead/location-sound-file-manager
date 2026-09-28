@@ -98,6 +98,17 @@ class CardWorkspaceTest(unittest.TestCase):
         with self.assertRaisesRegex(OSError, 'symbolic link'):
             self.prepare()
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'Mac disks ignore case and Unicode form')
+    def test_guard_ignores_case_and_unicode_form_on_mac(self):
+        card_safety.protect(self.card)
+        other_case = str(self.card.parent / self.card.name.upper())
+        with self.assertRaises(PermissionError):
+            card_safety.assert_writable(os.path.join(other_case, 'x.wav'))
+        accented = self.card / 'Café'  # NFD, as older Mac filesystems return it
+        card_safety.protect(accented)
+        with self.assertRaises(PermissionError):
+            card_safety.assert_writable(str(self.card / 'Café' / 'x.wav'))
+
     def test_destination_cannot_escape_selected_folder(self):
         with self.assertRaises(PermissionError):
             offload.destination_for(str(self.wav), str(self.card), str(self.nas), {'Project': '../card'})

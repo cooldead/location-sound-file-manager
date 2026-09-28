@@ -206,6 +206,34 @@ class PeriodTreeTest(unittest.TestCase):
         self.assertEqual(model.index(1, 0).data(), "Alpha  (2)")
 
 
+class StripWindowTest(unittest.TestCase):
+    def test_new_strips_open_no_windows(self):
+        """Loading a file must not flash any widget as a window of its own
+        (on macOS that leaves full screen)."""
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtWidgets import QWidget
+        from sound_file_manager.mixer_panel import MixerPanel
+        from . import dispose, qt_app
+        app = qt_app()
+        panel = dispose(self, MixerPanel())
+        panel.show()
+        shown = []
+
+        class Spy(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+                    shown.append(type(obj).__name__)
+                return False
+
+        spy = Spy()
+        app.installEventFilter(spy)
+        self.addCleanup(app.removeEventFilter, spy)
+        panel.set_state(MixerState.for_tracks(["BOOM", "LAV1", "LAV2", "LAV3"]))
+        app.processEvents()
+        self.assertEqual(shown, [])
+        self.assertEqual([s.link.isVisibleTo(panel) for s in panel.strips], [True, True, True, False])
+
+
 class StereoGuessTest(unittest.TestCase):
     def test_looks_stereo(self):
         from sound_file_manager.player import looks_stereo

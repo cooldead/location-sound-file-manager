@@ -9,10 +9,10 @@ A desktop app for Linux, macOS and Windows for browsing a library of production 
 | **Linux**: Arch, CachyOS, Manjaro | [v1.6.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.6.0-linux) | `location-sound-file-manager-1.6.0-1-x86_64.pkg.tar.zst`: install with `sudo pacman -U location-sound-file-manager-1.6.0-1-x86_64.pkg.tar.zst` (pulls in PySide6, Qt Multimedia and numpy). Adds the app to the menu; remove it with `sudo pacman -R location-sound-file-manager`. |
 | **Linux**: any distribution | [v1.6.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.6.0-linux) | `Location-Sound-File-Manager-1.6.0-x86_64.AppImage`: everything inside (Python, Qt, numpy), nothing to install. Make it executable (`chmod +x`, or Properties ▸ Permissions) and open it. Needs a distribution from 2022 or later (glibc 2.35+). |
 | **Linux**: from source | [v1.6.0 for Linux](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.6.0-linux) | `Location-Sound-File-Manager-1.6.0-linux.tar.gz`: extract it, install the packages below, then run `./install.sh` in the extracted folder ([details](#linux)). Or clone the repository. |
-| **macOS** (Apple silicon) | [v1.5.0 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.5.0-macos) | `Location-Sound-File-Manager-1.5.0-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt and numpy are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
+| **macOS** (Apple silicon) | [v1.6.1 for macOS](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.6.1-macos) | `Location-Sound-File-Manager-1.6.1-macOS-arm64.zip`: extract it and move **Location Sound File Manager.app** to Applications. Python, Qt, numpy and the Rust waveform core are inside. It is ad-hoc signed, not notarized: macOS may ask you to allow it in System Settings ▸ Privacy & Security the first time. |
 | **Windows** 10 and 11 (64-bit) | [v1.4.0 for Windows](https://github.com/cooldead/location-sound-file-manager/releases/tag/v1.4.0-windows) | `Location-Sound-File-Manager-1.4.0-windows-x64.zip`: extract it anywhere and open **Location Sound File Manager.exe** in the extracted folder. Python, Qt and numpy are inside. It is not code-signed: Windows SmartScreen may warn the first time (More info ▸ Run anyway). |
 
-The Linux, macOS and Windows releases are built separately from the shared source. The Linux packages are at v1.6.0, the macOS app at v1.5.0, and the Windows app at v1.4.0. Platform builds are published separately from the shared source. You can also build the Mac or Windows app from source ([macOS](#macos), [Windows](#windows)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
+The Linux, macOS and Windows releases are built separately from the shared source. The Linux packages are at v1.6.0, the macOS app at v1.6.1 (v1.6.0 plus a Mac full-screen fix), and the Windows app at v1.4.0. You can also build the Mac or Windows app from source ([macOS](#macos), [Windows](#windows)). All releases: [github.com/cooldead/location-sound-file-manager/releases](https://github.com/cooldead/location-sound-file-manager/releases).
 
 
 ## First run
@@ -145,7 +145,7 @@ Card detection uses `lsblk`, and ejecting uses `udisksctl` (both are standard on
 
 ### macOS
 
-Needs macOS 12 or later and Python 3.11+ (for example `brew install python`). To build a self-contained app (Python, Qt and numpy inside, about 130 MB):
+Needs macOS 12 or later, Python 3.11+ and Rust (for example `brew install python rust`; the Rust waveform core is built into the app). To build a self-contained app (Python, Qt and numpy inside, about 130 MB):
 
 ```sh
 git clone https://github.com/cooldead/location-sound-file-manager
