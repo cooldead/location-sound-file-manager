@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, compat, duplicates, offload, settings, splitter
+from . import bwf, catalog, compat, deepfilter, duplicates, offload, plugins, processing, settings, splitter
 from .offload import human_size
 from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
@@ -39,6 +39,7 @@ from .file_model import (
 )
 from .offload_page import OffloadPage
 from .player import SEEK_STEP, PlayerWidget
+from .processing_dialog import ProcessDialog, processable
 from .report import ASSETS
 from .branding_dialog import BrandingDialog, SetupDialog
 from .duplicates_dialog import DuplicatesWindow
@@ -287,6 +288,9 @@ class MainWindow(QMainWindow):
         self.act_combine = self._action("Combine into Polywav…", self.combine_selected, None, "insert-link",
                                         "Put the tracks of files of one take (e.g. split mono files) into one "
                                         "polywav")
+        self.act_process = self._action("Reduce Noise / Plug-ins…", self.reduce_noise_selected, None,
+                                        "audio-volume-low", "Make de-hissed, denoised, de-rustled or plug-in "
+                                        "processed copies of the selected files (the originals are not changed)")
         self.act_duplicates = self._action("Find Duplicates…", self.find_duplicates, "Ctrl+D", "edit-find",
                                            "Find duplicate recordings and duplicate projects, and merge or "
                                            "remove them")
@@ -384,7 +388,7 @@ class MainWindow(QMainWindow):
         self._update_brand()
         self.library_actions = [self.act_folder, self.act_rescan, self.act_rename, self.act_metadata,
                                 self.act_duplicates,
-                                self.act_organize, self.act_split, self.act_combine, self.act_undo, self.act_report, self.act_open_project,
+                                self.act_organize, self.act_split, self.act_combine, self.act_process, self.act_undo, self.act_report, self.act_open_project,
                                 self.act_circled, self.act_export, self.act_open_folder, self.act_copy_path,
                                 self.act_search]
         self._update_actions()
@@ -754,6 +758,7 @@ class MainWindow(QMainWindow):
         self.act_organize.setEnabled(bool(recs))
         self.act_split.setEnabled(any(splitter.splittable(r) is None for r in recs))
         self.act_combine.setEnabled(len(ok) >= 2)
+        self.act_process.setEnabled(any(processable(r) is None for r in recs))
         self.act_open_folder.setEnabled(len(recs) >= 1)
         self.act_copy_path.setEnabled(bool(recs))
         for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search,
@@ -953,7 +958,8 @@ class MainWindow(QMainWindow):
         play.triggered.connect(self.player.toggle_play)
         play.setEnabled(len(recs) == 1)
         menu.addSeparator()
-        for action in (self.act_rename, self.act_metadata, self.act_organize, self.act_split, self.act_combine):
+        for action in (self.act_rename, self.act_metadata, self.act_organize, self.act_split, self.act_combine,
+                       self.act_process):
             menu.addAction(action)
         family = self._family_of(recs)
         if family:
@@ -1429,6 +1435,118 @@ class MainWindow(QMainWindow):
             show_report(self, "Split", summary + ". Some originals could not be deleted:", delete_errors)
         else:
             self.statusBar().showMessage(summary + ("" if to_delete else f"  ({keys('Ctrl+Z')} undoes)"), 10000)
+
+    def reduce_noise_selected(self):
+        """Write de-hissed or denoised copies of the selected files (undoable:
+        undo deletes the copies). The originals are only read."""
+        recs = [r for r in self.selected_recordings() if processable(r) is None]
+        if not recs:
+            return
+        current, region = self.player.rec, None
+        if current is not None and self.player.wave.region is not None and current.frames:
+            region = tuple(int(f * current.frames) for f in self.player.wave.region)
+        if self.player.is_playing():
+            self.player.stop()
+        dialog = ProcessDialog(recs, self.qsettings, current, region, self.player.position(), self)
+        if not dialog.exec():
+            return
+        folder_mode, suffix = dialog.folder_mode(), dialog.suffix_text()
+        program = dialog.program() if dialog.mode() == "deepfilter" else None
+        chain = [vars(e) for e in dialog.chain] if dialog.mode() == "plugins" else None
+        client = plugins.HostClient(str(settings.history_path().parent)) if chain else None
+        skipped = {r.path for r in dialog.skipped()}
+        jobs = [(r, dialog.settings_for(r), dialog.region_profile_for(r)) for r in recs if r.path not in skipped]
+        jobs = [(r, s, use_region) for r, s, use_region in jobs if s.channels]
+        if not jobs:  # no ticked track in any file, or none at a rate the mode takes
+            QMessageBox.information(self, APP_NAME, "None of the selected files had anything to process.")
+            return
+        marked = (current.path, region) if dialog.uses_region() else None
+        k = 1000  # progress in thousands of frames: Qt's bar holds 32-bit numbers
+        total = sum(r.frames for r, _, _ in jobs) // k + 1
+        new_folders: list[str] = []
+
+        def work(job):
+            written, region_profile = [], None
+            try:
+                for index, (rec, chosen, use_region) in enumerate(jobs):
+                    done_before = sum(r.frames for r, _, _ in jobs[:index]) // k
+                    label = f"{index + 1} of {len(jobs)}: {rec.name}"
+                    engine = None
+                    if chain:
+                        dst = processing.output_path(rec.path, folder_mode, suffix)
+                        folder = os.path.dirname(dst)
+                        if not os.path.isdir(folder) and folder not in new_folders:
+                            new_folders.append(folder)
+                        job.report(done_before, total, f"Running the plug-ins on {label}…")
+                        try:
+                            client.request({"cmd": "process", "chain": chain, "src": rec.path, "dst": dst,
+                                            "channels": list(chosen.channels), "label": chosen.label},
+                                           progress=lambda d, t, b=done_before: job.report(b + d // k, total),
+                                           cancelled=lambda: job.cancelled)
+                        except BaseException:
+                            # A crash or cancel kills the helper before it can tidy up.
+                            part = compat.join(folder, f".{os.path.basename(dst)}.part")
+                            if os.path.exists(part):
+                                os.remove(part)
+                            raise
+                        written.append(dst)
+                        continue
+                    if program:
+                        profile, engine = None, deepfilter.Engine(program, chosen.reduction_db,
+                                                                  cancelled=lambda: job.cancelled)
+                    elif use_region:
+                        if region_profile is None:
+                            region_profile = processing.region_profile(marked[0], *marked[1])
+                        profile = region_profile
+                    else:
+                        job.report(done_before, total, f"Learning the noise of {label}…")
+                        profile = processing.estimate_file_profile(rec.path, cancelled=lambda: job.cancelled)
+                    dst = processing.output_path(rec.path, folder_mode, suffix)
+                    folder = os.path.dirname(dst)
+                    if not os.path.isdir(folder) and folder not in new_folders:
+                        new_folders.append(folder)
+                    job.report(done_before, total, ("Cleaning up the voice in " if program else "Reducing noise in ")
+                               + f"{label}…")
+                    try:
+                        written.append(processing.process_file(
+                            rec.path, dst, profile, chosen, cancelled=lambda: job.cancelled, engine=engine,
+                            progress=lambda d, t, b=done_before: job.report(b + d // k, total)))
+                    finally:
+                        if engine is not None:
+                            engine.close()
+            except BaseException:
+                for path in written:
+                    try:
+                        card_safety.assert_writable(path)
+                        os.remove(path)
+                    except OSError:
+                        pass
+                remove_empty_dirs([Path(f) for f in new_folders])
+                raise
+            finally:
+                if client is not None:
+                    client.close()
+            return written
+
+        written, error = run_job(self, "Reducing noise", work)
+        if error is not None:
+            if not isinstance(error, InterruptedError):
+                QMessageBox.warning(self, APP_NAME, f"No copies were made:\n{error}")
+            return
+        self._add_to_library(written)
+        self._tree_timer.start()
+        what = "plug-in processing" if chain else "noise reduction"
+        label = f"{what} of {jobs[0][0].name}" if len(jobs) == 1 else f"{what} of {len(jobs)} files"
+        self._push_undo({"kind": "copies", "label": label, "paths": written, "created_dirs": new_folders})
+        self._log("reduce_noise", files=[r.path for r, _, _ in jobs], written=written,
+                  settings=[s.describe() for _, s, _ in jobs[:1]],
+                  profile=("plug-ins" if chain else "DeepFilterNet" if program else
+                           "marked region" if marked else "quietest parts"),
+                  skipped=sorted(skipped))
+        self._select_paths(set(written))
+        self.statusBar().showMessage(f"Made {len(written):,} processed cop{'y' if len(written) == 1 else 'ies'} "
+                                     + (f"; {len(skipped):,} not 48 kHz, skipped " if skipped else " ")
+                                     + f"({keys('Ctrl+Z')} deletes them)", 10000)
 
     def combine_selected(self):
         """Put the tracks of several files of one take into one polywav (undoable)."""

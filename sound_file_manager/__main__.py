@@ -1,14 +1,23 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
-
-from . import compat, settings
-from .main_window import APP_NAME, MainWindow
-
 
 def main() -> int:
+    # The plug-in helper (plugins.py) is this same program started with
+    # --plugin-host: it must not load Qt or the window, so this comes first.
+    if "--plugin-host" in sys.argv[1:]:
+        from .plugin_host import main as plugin_host
+        return plugin_host()
+    return run_app()
+
+
+def run_app() -> int:
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QApplication
+
+    from . import compat, settings
+    from .main_window import APP_NAME, MainWindow
+
     if compat.WINDOWS:
         # Our own taskbar button and icon, not python.exe's.
         import ctypes

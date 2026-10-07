@@ -26,6 +26,16 @@ DEFAULTS: dict[str, object] = {
     "combine_sources": "keep",        # after combining, the files: "keep", "remove" (removed folder), "delete"
     "split_delete_permanently": False,  # originals that leave a split are deleted instead of moved away
     "split_shrink_original": False,   # tracks not split off: the original is shrunk to them (else kept whole)
+    "process_mode": "denoise",        # Reduce Noise: "denoise", "dehiss", "deepfilter" (add-on) or "plugins"
+    "process_reduction_db": 12.0,     # the most any frequency is turned down
+    "process_df_reduction_db": 24.0,  # DeepFilterNet's attenuation limit (100 = no limit)
+    "process_plugin_chain": "",       # the plug-in chain (plugins.chain_to_json)
+    "plugin_folders": [],             # extra folders searched for VST2/VST3 plug-ins
+    "plugin_list": "",                # the plug-ins found by the last scan (JSON, from plugins.probe_all)
+    "process_threshold_db": 3.0,      # how far above the noise level still counts as noise
+    "process_hiss_khz": 4.0,          # de-hiss: full strength from here up
+    "process_folder": "processed",    # copies go into "Processed/" beside the file, or "beside" it
+    "process_suffix": "_NR",          # added to the copies' names (never empty: see processing.py)
     "confirm_undo": True,
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
     "waveform_scale": "db",           # "db" or "linear"
@@ -63,7 +73,7 @@ DEFAULTS: dict[str, object] = {
 
 
 # Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
-PATH_KEYS = {"card_working_folder", "library_folder", "mixer_folder", "offload_destinations"}
+PATH_KEYS = {"card_working_folder", "library_folder", "mixer_folder", "offload_destinations", "plugin_folders"}
 
 
 def get(settings: QSettings, key: str):
