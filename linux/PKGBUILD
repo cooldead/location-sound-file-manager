@@ -1,7 +1,7 @@
 # Arch Linux / CachyOS / Manjaro package. Build with linux/build_packages.sh,
 # or by hand: makepkg -si (downloads the Linux release tarball).
 pkgname=location-sound-file-manager
-pkgver=1.7.0
+pkgver=1.8.0
 pkgrel=1
 pkgdesc="Offload recorder cards, make sound reports, and browse, play, rename and organise production sound (BWF/iXML)"
 arch=('x86_64' 'aarch64')

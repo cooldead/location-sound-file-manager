@@ -36,7 +36,14 @@ DEFAULTS: dict[str, object] = {
     "process_hiss_khz": 4.0,          # de-hiss: full strength from here up
     "process_folder": "processed",    # copies go into "Processed/" beside the file, or "beside" it
     "process_suffix": "_NR",          # added to the copies' names (never empty: see processing.py)
+    "effects_chain": "",              # Effects window: the chain (effects.chain_to_json); "" = the rumble filter preset
+    "effects_folder": "processed",    # like process_folder
+    "effects_suffix": "_FX",          # like process_suffix
+    "effects_import_folder": "",      # where Easy Effects presets were last imported from
+    "loudness_platform": "netflix",   # Loudness Check: the delivery target (loudness.TARGETS key)
+    "loudness_together": False,       # measure the ticked tracks as one programme (else each on its own)
     "confirm_undo": True,
+    "confirm_loudness_fix": True,     # Loudness Check: ask before Fix Automatically makes copies
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
     "waveform_scale": "db",           # "db" or "linear"
     "waveform_detailed": True,        # refine the selected file after a quick preview
@@ -73,7 +80,8 @@ DEFAULTS: dict[str, object] = {
 
 
 # Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
-PATH_KEYS = {"card_working_folder", "library_folder", "mixer_folder", "offload_destinations", "plugin_folders"}
+PATH_KEYS = {"card_working_folder", "effects_import_folder", "library_folder", "mixer_folder", "offload_destinations",
+             "plugin_folders"}
 
 
 def get(settings: QSettings, key: str):

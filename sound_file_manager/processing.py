@@ -33,8 +33,8 @@ import numpy as np
 
 from . import bwf, card_safety, compat, splitter, waveform
 
-MODES = ("denoise", "dehiss", "deepfilter", "plugins")  # deepfilter: deepfilter.py; plugins: plugins.py
-ENGINE_MODES = ("deepfilter", "plugins")  # these run through an engine object instead of a noise profile
+MODES = ("denoise", "dehiss", "deepfilter", "plugins", "effects")  # deepfilter.py, plugins.py, effects.py
+ENGINE_MODES = ("deepfilter", "plugins", "effects")  # these run through an engine object instead of a noise profile
 PROCESSED_FOLDER = "Processed"
 DEFAULT_SUFFIX = "_NR"
 BLOCK_FRAMES = 1 << 18          # about 5.5 s at 48 kHz per block
@@ -51,13 +51,15 @@ class Settings:
     threshold_db: float = 3.0        # how far above the noise level a frequency still counts as noise
     hiss_from_hz: float = 4000.0     # de-hiss: where it starts (full strength from here, fading in below)
     channels: tuple[int, ...] | None = None  # the tracks to process (0-based); None = all; others pass unchanged
-    label: str = ""                  # plugins: the chain, for the coding history
+    label: str = ""                  # plugins / effects: the chain, for the coding history
 
     def describe(self) -> str:
         if self.mode == "deepfilter":
             return f"DeepFilterNet voice cleanup, up to {self.reduction_db:g} dB"
         if self.mode == "plugins":
             return f"plug-ins: {self.label or 'chain'}"
+        if self.mode == "effects":
+            return f"effects: {self.label or 'chain'}"
         what = f"de-hiss from {self.hiss_from_hz / 1000:g} kHz" if self.mode == "dehiss" else "denoise"
         return f"{what}, up to {self.reduction_db:g} dB, threshold {self.threshold_db:g} dB"
 
@@ -377,6 +379,8 @@ def _engine_block(engine, reader, samples: np.ndarray, a: int, b: int, channels)
 def _check_engine(settings: Settings, engine, rate: int) -> None:
     if settings.mode == "plugins" and engine is None:
         raise ValueError("no plug-in chain to run")
+    if settings.mode == "effects" and engine is None:
+        raise ValueError("no effects to run")
     if settings.mode == "deepfilter":
         if engine is None:
             raise ValueError("the DeepFilterNet add-on isn't installed")
@@ -397,6 +401,8 @@ def preview(path: str, first: int, end: int, profile: Profile | None, settings: 
         if settings.mode in ENGINE_MODES:
             channels = [c for c in (settings.channels if settings.channels is not None else range(info.channels))
                         if c < info.channels]
+            if settings.mode == "effects":  # loudness: measured on the preview's stretch only
+                engine.prepare(reader, channels, first, end)
             return original, _engine_block(engine, reader, original, first, end, channels), info.sample_rate
         return original, reduce(original, profile, settings, info.sample_rate, reader, first), info.sample_rate
 
@@ -474,7 +480,12 @@ def process_file(src: str, dst: str, profile: Profile | None, settings: Settings
         rng = np.random.default_rng(0)
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         temp = compat.join(os.path.dirname(dst), f".{name}.part")
+        measuring = settings.mode == "effects" and picked and engine.needs_measuring()
+        if measuring and progress:  # the loudness pass is the first half of the bar, writing the second
+            outer, progress = progress, lambda d, t: outer(frames // 2 + d // 2, frames)
         try:
+            if measuring:
+                engine.prepare(reader, picked, progress=(lambda d, t: outer(d // 2, frames)) if progress else None)
             with open(temp, "wb") as out:
                 out.write(header)
                 step = engine.block_frames if settings.mode in ENGINE_MODES else BLOCK_FRAMES

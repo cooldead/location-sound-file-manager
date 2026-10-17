@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import bwf, catalog, compat, deepfilter, duplicates, offload, plugins, processing, settings, splitter
+from . import (bwf, catalog, compat, deepfilter, duplicates, effects, loudness, offload, plugins, processing, settings,
+               splitter)
 from .offload import human_size
 from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
@@ -39,7 +40,9 @@ from .file_model import (
 )
 from .offload_page import OffloadPage
 from .player import SEEK_STEP, PlayerWidget
-from .processing_dialog import ProcessDialog, processable
+from .processing_dialog import ProcessDialog, processable, track_names
+from .effects_dialog import EffectsDialog
+from .loudness_dialog import MAKE_COPIES, LoudnessCheckDialog
 from .report import ASSETS
 from .branding_dialog import BrandingDialog, SetupDialog
 from .duplicates_dialog import DuplicatesWindow
@@ -291,6 +294,13 @@ class MainWindow(QMainWindow):
         self.act_process = self._action("Reduce Noise / Plug-ins…", self.reduce_noise_selected, None,
                                         "audio-volume-low", "Make de-hissed, denoised, de-rustled or plug-in "
                                         "processed copies of the selected files (the originals are not changed)")
+        self.act_effects = self._action("Effects…", self.effects_selected, None, "media-playlist-shuffle",
+                                        "Make copies of the selected files through an effects chain: filter, EQ, "
+                                        "gate, expander, compressor, de-esser, limiter, loudness (the originals are "
+                                        "not changed)")
+        self.act_loudness = self._action("Loudness Check…", self.loudness_check, None, "view-statistics",
+                                         "Measure loudness and true peak, and check them against a delivery spec "
+                                         "(Netflix, YouTube, EBU R128…); nothing is changed")
         self.act_duplicates = self._action("Find Duplicates…", self.find_duplicates, "Ctrl+D", "edit-find",
                                            "Find duplicate recordings and duplicate projects, and merge or "
                                            "remove them")
@@ -388,7 +398,7 @@ class MainWindow(QMainWindow):
         self._update_brand()
         self.library_actions = [self.act_folder, self.act_rescan, self.act_rename, self.act_metadata,
                                 self.act_duplicates,
-                                self.act_organize, self.act_split, self.act_combine, self.act_process, self.act_undo, self.act_report, self.act_open_project,
+                                self.act_organize, self.act_split, self.act_combine, self.act_process, self.act_effects, self.act_loudness, self.act_undo, self.act_report, self.act_open_project,
                                 self.act_circled, self.act_export, self.act_open_folder, self.act_copy_path,
                                 self.act_search]
         self._update_actions()
@@ -759,6 +769,8 @@ class MainWindow(QMainWindow):
         self.act_split.setEnabled(any(splitter.splittable(r) is None for r in recs))
         self.act_combine.setEnabled(len(ok) >= 2)
         self.act_process.setEnabled(any(processable(r) is None for r in recs))
+        self.act_effects.setEnabled(any(processable(r) is None for r in recs))
+        self.act_loudness.setEnabled(any(processable(r) is None for r in recs))
         self.act_open_folder.setEnabled(len(recs) >= 1)
         self.act_copy_path.setEnabled(bool(recs))
         for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search,
@@ -959,7 +971,7 @@ class MainWindow(QMainWindow):
         play.setEnabled(len(recs) == 1)
         menu.addSeparator()
         for action in (self.act_rename, self.act_metadata, self.act_organize, self.act_split, self.act_combine,
-                       self.act_process):
+                       self.act_process, self.act_effects, self.act_loudness):
             menu.addAction(action)
         family = self._family_of(recs)
         if family:
@@ -1547,6 +1559,134 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Made {len(written):,} processed cop{'y' if len(written) == 1 else 'ies'} "
                                      + (f"; {len(skipped):,} not 48 kHz, skipped " if skipped else " ")
                                      + f"({keys('Ctrl+Z')} deletes them)", 10000)
+
+    def loudness_check(self):
+        """Measure the selected files against a delivery spec (read only)."""
+        recs = [r for r in self.selected_recordings() if processable(r) is None]
+        if not recs:
+            return
+        dialog = LoudnessCheckDialog(recs, self.qsettings, self, fix=self.fix_loudness)
+        if dialog.exec() == MAKE_COPIES:
+            self.effects_selected(effects.delivery_chain(dialog.target()))
+
+    def fix_loudness(self, jobs: list, target, together: bool, parent=None) -> list[str] | None:
+        """Loudness Check's Fix: write a copy of each (recording, channels) at the
+        target (loudness, then a true-peak limiter), with no Effects window between.
+        Tracks measured together get one gain for all of them, so the mix stays as
+        it was. Undoable like Effects; returns the copies in the order of jobs."""
+        label = f"delivery to {target.name} ({target.integrated:g} LUFS, {target.true_peak - 0.3:g} dBTP limiter)"
+        chosen = [(rec, processing.Settings(mode="effects", label=label, channels=tuple(channels)))
+                  for rec, channels in jobs]
+        gains: dict[str, float | None] = {}
+
+        def prepare(job, rec, done_before, total, k):
+            if together:
+                job.report(done_before, total, f"Measuring {rec.name} for {target.name}…")
+                gains[rec.path] = loudness.programme_gain(rec.path, dict((r.path, c) for r, c in jobs)[rec.path],
+                                                          target.integrated, cancelled=lambda: job.cancelled)
+
+        def chain_for(rec):
+            if not together:
+                return effects.delivery_chain(target)
+            gain = gains.get(rec.path)
+            # Like the Loudness effect: too quiet to measure is left as it is, and
+            # nothing is raised by more than its default limit.
+            most = effects.clamp_params("loudness", {})["max_gain"]
+            return effects.delivery_chain(target, 0.0 if gain is None else min(gain, most))
+
+        made = self.write_effect_copies(chosen, chain_for, settings.get(self.qsettings, "effects_folder"),
+                                        loudness.copy_suffix(target), parent, prepare)
+        return None if made is None else made[0]
+
+    def effects_selected(self, chain: list | None = None):
+        """Write copies of the selected files through the effects chain
+        (undoable: undo deletes the copies). The originals are only read.
+        chain: start from this chain instead of the last one used."""
+        recs = [r for r in self.selected_recordings() if processable(r) is None]
+        if not recs:
+            return
+        if self.player.is_playing():
+            self.player.stop()
+        dialog = EffectsDialog(recs, self.qsettings, self.player.rec, self.player.position(), self,
+                               chain=chain if isinstance(chain, list) else None)
+        if not dialog.exec():
+            return
+        folder_mode, suffix = dialog.folder_mode(), dialog.suffix_text()
+        jobs = [(r, dialog.settings_for(r)) for r in recs]
+        jobs = [(r, s) for r, s in jobs if s.channels]
+        if not jobs:
+            QMessageBox.information(self, APP_NAME, "None of the selected files had a ticked track.")
+            return
+        made = self.write_effect_copies(jobs, lambda rec: dialog.chain, folder_mode, suffix)
+        if made is None:
+            return
+        written, reports = made
+        missed = [line for line in reports if "target not reached" in line or "too quiet" in line]
+        if missed:
+            show_report(self, "Effects", f"Made {len(written):,} cop{'y' if len(written) == 1 else 'ies'}. "
+                        "Some tracks didn't reach the loudness target:", missed)
+
+    def write_effect_copies(self, jobs: list, chain_for, folder_mode: str, suffix: str, parent=None,
+                            prepare=None) -> tuple[list[str], list[str]] | None:
+        """Write a copy of each (recording, processing.Settings) through the chain
+        chain_for(rec) gives (undoable: undo deletes the copies). The originals are
+        only read. prepare(job, rec, done_before, total, k): optional work per file
+        before its copy (inside the job), e.g. measuring it. Returns the copies (in
+        the order of jobs) and the Loudness report lines, or None if nothing was
+        made (an error has been shown)."""
+        parent = parent or self
+        k = 1000  # progress in thousands of frames: Qt's bar holds 32-bit numbers
+        total = sum(r.frames for r, _ in jobs) // k + 1
+        new_folders: list[str] = []
+        reports: list[str] = []
+        chains: list[list] = []
+
+        def work(job):
+            written = []
+            try:
+                for index, (rec, chosen) in enumerate(jobs):
+                    done_before = sum(r.frames for r, _ in jobs[:index]) // k
+                    dst = processing.output_path(rec.path, folder_mode, suffix)
+                    folder = os.path.dirname(dst)
+                    if not os.path.isdir(folder) and folder not in new_folders:
+                        new_folders.append(folder)
+                    if prepare is not None:
+                        prepare(job, rec, done_before, total, k)
+                    job.report(done_before, total, f"Effects on {index + 1} of {len(jobs)}: {rec.name}…")
+                    chain = chain_for(rec)
+                    chains.append(chain)
+                    engine = effects.Engine(chain, rec.sample_rate, cancelled=lambda: job.cancelled)
+                    written.append(processing.process_file(
+                        rec.path, dst, None, chosen, cancelled=lambda: job.cancelled, engine=engine,
+                        progress=lambda d, t, b=done_before: job.report(b + d // k, total)))
+                    reports.extend(f"{os.path.basename(dst)}: {line}" for line in engine.report(
+                        track_names(rec)) if "Loudness" in line)
+            except BaseException:
+                for path in written:
+                    try:
+                        card_safety.assert_writable(path)
+                        os.remove(path)
+                    except OSError:
+                        pass
+                remove_empty_dirs([Path(f) for f in new_folders])
+                raise
+            return written
+
+        written, error = run_job(parent, "Applying effects", work)
+        if error is not None:
+            if not isinstance(error, InterruptedError):
+                QMessageBox.warning(parent, APP_NAME, f"No copies were made:\n{error}")
+            return None
+        self._add_to_library(written)
+        self._tree_timer.start()
+        label = f"effects on {jobs[0][0].name}" if len(jobs) == 1 else f"effects on {len(jobs)} files"
+        self._push_undo({"kind": "copies", "label": label, "paths": written, "created_dirs": new_folders})
+        self._log("effects", files=[r.path for r, _ in jobs], written=written,
+                  chain=[json.loads(effects.chain_to_json(c)) for c in chains], loudness=reports)
+        self._select_paths(set(written))
+        self.statusBar().showMessage(f"Made {len(written):,} cop{'y' if len(written) == 1 else 'ies'} with effects "
+                                     f"({keys('Ctrl+Z')} deletes them)", 10000)
+        return written, reports
 
     def combine_selected(self):
         """Put the tracks of several files of one take into one polywav (undoable)."""
