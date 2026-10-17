@@ -9,6 +9,7 @@ import csv
 import dataclasses
 import json
 import os
+import shutil
 import time
 from html import escape
 from pathlib import Path
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import (bwf, catalog, compat, deepfilter, duplicates, effects, loudness, offload, plugins, processing, settings,
-               splitter)
+               splitter, video_sync)
 from .offload import human_size
 from .organize import find_empty_folders, remove_left_empty, remove_tree_if_empty
 from .catalog import Recording
@@ -43,6 +44,8 @@ from .player import SEEK_STEP, PlayerWidget
 from .processing_dialog import ProcessDialog, processable, track_names
 from .effects_dialog import EffectsDialog
 from .loudness_dialog import MAKE_COPIES, LoudnessCheckDialog
+from .video_sync_dialog import VideoSyncDialog
+from . import timecode as tc
 from .report import ASSETS
 from .branding_dialog import BrandingDialog, SetupDialog
 from .duplicates_dialog import DuplicatesWindow
@@ -301,6 +304,10 @@ class MainWindow(QMainWindow):
         self.act_loudness = self._action("Loudness Check…", self.loudness_check, None, "view-statistics",
                                          "Measure loudness and true peak, and check them against a delivery spec "
                                          "(Netflix, YouTube, EBU R128…); nothing is changed")
+        self.act_video_sync = self._action("Sync with Video…", self.video_sync, None, "video-x-generic",
+                                           "Match takes to a camera's clips by timecode, and make synced video "
+                                           "copies or a timeline for Final Cut Pro, Resolve or Premiere (the "
+                                           "originals are not changed)")
         self.act_duplicates = self._action("Find Duplicates…", self.find_duplicates, "Ctrl+D", "edit-find",
                                            "Find duplicate recordings and duplicate projects, and merge or "
                                            "remove them")
@@ -398,7 +405,7 @@ class MainWindow(QMainWindow):
         self._update_brand()
         self.library_actions = [self.act_folder, self.act_rescan, self.act_rename, self.act_metadata,
                                 self.act_duplicates,
-                                self.act_organize, self.act_split, self.act_combine, self.act_process, self.act_effects, self.act_loudness, self.act_undo, self.act_report, self.act_open_project,
+                                self.act_organize, self.act_split, self.act_combine, self.act_process, self.act_effects, self.act_loudness, self.act_video_sync, self.act_undo, self.act_report, self.act_open_project,
                                 self.act_circled, self.act_export, self.act_open_folder, self.act_copy_path,
                                 self.act_search]
         self._update_actions()
@@ -774,7 +781,7 @@ class MainWindow(QMainWindow):
         self.act_open_folder.setEnabled(len(recs) >= 1)
         self.act_copy_path.setEnabled(bool(recs))
         for action in (self.act_folder, self.act_rescan, self.act_circled, self.act_export, self.act_search,
-                       self.act_duplicates):
+                       self.act_duplicates, self.act_video_sync):
             action.setEnabled(True)
         self.act_rescan.setEnabled(self.scan_thread is None)
         self.act_undo.setEnabled(bool(self.undo_stack))
@@ -971,7 +978,7 @@ class MainWindow(QMainWindow):
         play.setEnabled(len(recs) == 1)
         menu.addSeparator()
         for action in (self.act_rename, self.act_metadata, self.act_organize, self.act_split, self.act_combine,
-                       self.act_process, self.act_effects, self.act_loudness):
+                       self.act_process, self.act_effects, self.act_loudness, self.act_video_sync):
             menu.addAction(action)
         family = self._family_of(recs)
         if family:
@@ -1687,6 +1694,99 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Made {len(written):,} cop{'y' if len(written) == 1 else 'ies'} with effects "
                                      f"({keys('Ctrl+Z')} deletes them)", 10000)
         return written, reports
+
+    def video_sync(self):
+        """Match takes to a camera folder's clips by timecode; write synced MOV
+        copies and/or a timeline file (undoable: undo deletes what was made).
+        Takes come from the selected files, or from every file shown when one
+        or none is selected."""
+        if not shutil.which(video_sync.tool("ffprobe")) or not shutil.which(video_sync.tool("ffmpeg")):
+            QMessageBox.information(self, APP_NAME, "Sync with Video needs ffmpeg (with ffprobe). Install it from "
+                                    "your package manager (macOS: brew install ffmpeg) and try again.")
+            return
+        recs = [r for r in self.selected_recordings() if not r.error]
+        if len(recs) > 1:
+            scope = f"the {len(recs):,} selected files"
+        else:
+            recs = [self.proxy.index(i, 0).data(REC_ROLE) for i in range(self.proxy.rowCount())]
+            recs = [r for r in recs if not r.error]
+            scope = f"the {len(recs):,} files shown in the list"
+        if self.player.is_playing():
+            self.player.stop()
+        dialog = VideoSyncDialog(recs, self.qsettings, self, scope=scope)
+        QTimer.singleShot(0, dialog.choose_folder)  # a camera folder is picked each time (starting at the last)
+        if not dialog.exec():
+            return
+        chosen, folder, editor = dialog.chosen(), dialog.copies_folder(), dialog.editor_key()
+        timeline_path = None
+        if editor:
+            name, ext = video_sync.EDITORS[editor]
+            default = f"{dialog.folder}/{os.path.basename(dialog.folder) or 'Synced'}{ext}"
+            timeline_path, _ = QFileDialog.getSaveFileName(self, f"Save Timeline for {name}", default,
+                                                           f"{name} timeline (*{ext})")
+            if not timeline_path:
+                return
+            if not timeline_path.endswith(ext):
+                timeline_path += ext
+        groups = video_sync.by_clip(chosen) if folder else []
+        new_folders = [folder] if folder and not os.path.isdir(folder) else []
+
+        def work(job):
+            written, failed = [], []
+            try:
+                for index, group in enumerate(groups):
+                    clip = group[0].clip
+                    job.report(index, len(groups), f"Syncing {index + 1} of {len(groups)}: {clip.name}…")
+                    os.makedirs(folder, exist_ok=True)
+                    try:
+                        written.append(video_sync.write_synced_copy(
+                            group, video_sync.synced_path(clip, folder), cancelled=lambda: job.cancelled))
+                    except (OSError, RuntimeError, ValueError) as error:
+                        failed.append(f"{clip.name}: {error}")
+            except BaseException:
+                for path in written:
+                    try:
+                        card_safety.assert_writable(path)
+                        os.remove(path)
+                    except OSError:
+                        pass
+                remove_empty_dirs([Path(f) for f in new_folders])
+                raise
+            if not written:
+                remove_empty_dirs([Path(f) for f in new_folders])  # every clip failed
+            return written, failed
+
+        (written, failed), error = run_job(self, "Syncing with video", work) if groups else (([], []), None)
+        if error is not None:
+            if not isinstance(error, InterruptedError):
+                QMessageBox.warning(self, APP_NAME, f"No synced copies were made:\n{error}")
+            return
+        made = list(written)
+        left_out = []
+        if timeline_path:
+            existed = os.path.exists(timeline_path)  # the save dialog asked before replacing it
+            try:
+                result = video_sync.timeline(chosen, editor, os.path.splitext(os.path.basename(timeline_path))[0])
+                video_sync.write_timeline(result, timeline_path)
+                left_out = [f"{c.name}: not on the timeline (it runs at {tc.rate_label(c.rate, c.drop_frame)} fps, the timeline at another "
+                            "rate)" for c in result.left_out]
+                if not existed:
+                    made.append(timeline_path)  # a file it replaced isn't deleted by undo
+            except (OSError, ValueError, SyntaxError) as error:
+                failed.append(f"Timeline: {error}")
+        if made:
+            label = "sync with video"
+            self._push_undo({"kind": "copies", "label": label, "paths": made, "created_dirs": new_folders})
+        self._log("video sync", clips=sorted({m.clip.path for m in chosen}), takes=sorted({m.rec.path for m in chosen}),
+                  written=written, timeline=timeline_path, failed=failed)
+        summary = (f"Made {len(written):,} synced cop{'y' if len(written) == 1 else 'ies'}"
+                   + (f" in {folder}" if written else "") + (f" and the timeline {timeline_path}" if timeline_path
+                                                             and not any(f.startswith("Timeline:") for f in failed)
+                                                             else "") + ".")
+        if failed or left_out:
+            show_report(self, "Sync with Video", summary + " Some things were not made:", failed + left_out)
+        else:
+            self.statusBar().showMessage(summary + f"  ({keys('Ctrl+Z')} deletes them)", 10000)
 
     def combine_selected(self):
         """Put the tracks of several files of one take into one polywav (undoable)."""

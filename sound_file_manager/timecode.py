@@ -82,6 +82,20 @@ def frames_to_tc(frames: int, fps: int, drop: bool = False) -> str:
     return f"{hh:02}:{mm:02}:{ss:02}{';' if drop else ':'}{ff:02}"
 
 
+def tc_to_frames(text: str, fps: int, drop: bool = False) -> int | None:
+    """"HH:MM:SS:FF" (or ";"/"." before frames for drop frame) -> frame count
+    since midnight; the inverse of frames_to_tc. None if it isn't a timecode."""
+    match = re.match(r"^\s*(\d{1,2})[:;.](\d{2})[:;.](\d{2})[:;.,](\d{2})\s*$", text or "")
+    if not match:
+        return None
+    hh, mm, ss, ff = (int(g) for g in match.groups())
+    frames = ((hh * 60 + mm) * 60 + ss) * fps + ff
+    if drop and fps % 30 == 0:
+        minutes = hh * 60 + mm
+        frames -= fps // 15 * (minutes - minutes // 10)
+    return frames
+
+
 def samples_to_tc(samples: int, sample_rate: int, rate: Fraction, drop: bool = False) -> str:
     """Samples since midnight (BWF time reference) -> timecode at the given rate."""
     frames = int(Fraction(samples) * rate / sample_rate)

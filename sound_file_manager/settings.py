@@ -42,6 +42,10 @@ DEFAULTS: dict[str, object] = {
     "effects_import_folder": "",      # where Easy Effects presets were last imported from
     "loudness_platform": "netflix",   # Loudness Check: the delivery target (loudness.TARGETS key)
     "loudness_together": False,       # measure the ticked tracks as one programme (else each on its own)
+    "video_sync_folder": "",         # Sync with Video: the camera folder last read
+    "video_sync_copies": True,        # make synced video copies (MOV, takes added as audio tracks)
+    "video_sync_timeline": True,      # make a timeline file for an editor
+    "video_sync_editor": "resolve",   # video_sync.EDITORS key: "fcp", "resolve" or "premiere"
     "confirm_undo": True,
     "confirm_loudness_fix": True,     # Loudness Check: ask before Fix Automatically makes copies
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
@@ -81,6 +85,7 @@ DEFAULTS: dict[str, object] = {
 
 # Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
 PATH_KEYS = {"card_working_folder", "effects_import_folder", "library_folder", "mixer_folder", "offload_destinations",
+             "video_sync_folder",
              "plugin_folders"}
 
 
