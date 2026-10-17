@@ -26,7 +26,24 @@ DEFAULTS: dict[str, object] = {
     "combine_sources": "keep",        # after combining, the files: "keep", "remove" (removed folder), "delete"
     "split_delete_permanently": False,  # originals that leave a split are deleted instead of moved away
     "split_shrink_original": False,   # tracks not split off: the original is shrunk to them (else kept whole)
+    "process_mode": "denoise",        # Reduce Noise: "denoise", "dehiss", "deepfilter" (add-on) or "plugins"
+    "process_reduction_db": 12.0,     # the most any frequency is turned down
+    "process_df_reduction_db": 24.0,  # DeepFilterNet's attenuation limit (100 = no limit)
+    "process_plugin_chain": "",       # the plug-in chain (plugins.chain_to_json)
+    "plugin_folders": [],             # extra folders searched for VST2/VST3 plug-ins
+    "plugin_list": "",                # the plug-ins found by the last scan (JSON, from plugins.probe_all)
+    "process_threshold_db": 3.0,      # how far above the noise level still counts as noise
+    "process_hiss_khz": 4.0,          # de-hiss: full strength from here up
+    "process_folder": "processed",    # copies go into "Processed/" beside the file, or "beside" it
+    "process_suffix": "_NR",          # added to the copies' names (never empty: see processing.py)
+    "effects_chain": "",              # Effects window: the chain (effects.chain_to_json); "" = the rumble filter preset
+    "effects_folder": "processed",    # like process_folder
+    "effects_suffix": "_FX",          # like process_suffix
+    "effects_import_folder": "",      # where Easy Effects presets were last imported from
+    "loudness_platform": "netflix",   # Loudness Check: the delivery target (loudness.TARGETS key)
+    "loudness_together": False,       # measure the ticked tracks as one programme (else each on its own)
     "confirm_undo": True,
+    "confirm_loudness_fix": True,     # Loudness Check: ask before Fix Automatically makes copies
     "waveform_view": "overlay",       # "overlay" (all tracks in one lane) or "lanes"
     "waveform_scale": "db",           # "db" or "linear"
     "waveform_detailed": True,        # refine the selected file after a quick preview
@@ -63,7 +80,8 @@ DEFAULTS: dict[str, object] = {
 
 
 # Settings that hold folders; on Windows a typed "C:\..." is read back with "/".
-PATH_KEYS = {"card_working_folder", "library_folder", "mixer_folder", "offload_destinations"}
+PATH_KEYS = {"card_working_folder", "effects_import_folder", "library_folder", "mixer_folder", "offload_destinations",
+             "plugin_folders"}
 
 
 def get(settings: QSettings, key: str):
